@@ -8,11 +8,17 @@ HLDS is 32-bit, so the plugin must be built for 32-bit.
 
 Requires CMake and an SDK directory containing `cssdk/` and `metamod/`:
 
-- `cssdk/` — headers from [ReGameDLL_CS](https://github.com/rehlds/ReGameDLL_CS)
-  (`regamedll/`, which provides `common/`, `dlls/`, `engine/` and `public/`)
+- `cssdk/` — `common/`, `dlls/`, `engine/` and `public/` from either
+  [ReGameDLL_CS](https://github.com/rehlds/ReGameDLL_CS) (`regamedll/`) or the
+  stock [Half-Life SDK](https://github.com/ValveSoftware/halflife); both build
 - `metamod/` — plugin headers from [Metamod-R](https://github.com/rehlds/Metamod-R)
+  or any Metamod 1.19+ SDK
 
 Point `FASTDL_MM_SDK_ROOT` at the directory holding both.
+
+Nothing ReGameDLL- or ReHLDS-specific is used at runtime: the plugin hooks only
+`GameInit` and `StartFrame` and calls stock engine functions, so it runs on an
+unmodified HLDS with standard Metamod.
 
 ### Windows
 

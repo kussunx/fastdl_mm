@@ -5,6 +5,14 @@
 #include <extdll.h>
 #include <meta_api.h>
 
+// Valve's HLSDK pulls minmax.h in through extdll.h, which defines min, max and
+// clamp as macros and breaks the std:: versions at their call sites. ReGameDLL's
+// headers keep them in mathlib.h, which extdll.h does not include, so this is a
+// no-op there.
+#undef min
+#undef max
+#undef clamp
+
 #include "config.h"
 #include "config_parser.h"
 #include "fastdl_server.h"
