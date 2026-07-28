@@ -55,7 +55,7 @@ cvar_t cvarServeTypes = {"fastdl_serve_types",
     "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2",
     FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarMaxFileMb = {"fastdl_max_file_mb", "250", FCVAR_SERVER, 0.0f, nullptr};
-cvar_t cvarThreads = {"fastdl_threads", "4", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarThreads = {"fastdl_threads", "1", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarConnections = {"fastdl_max_connections_ip", "32", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarRequests = {"fastdl_requests_minute", "500", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarDenials = {"fastdl_denials_minute", "36", FCVAR_SERVER, 0.0f, nullptr};

@@ -90,7 +90,7 @@ fastdl_root              "cstrike"
 fastdl_serve_dirs        "sprites,sound,sounds,overviews,models,maps,gfx"
 fastdl_serve_types       "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2"
 fastdl_max_file_mb       "250"
-fastdl_threads           "4"
+fastdl_threads           "1"
 fastdl_log               "logs/fastdl/fastdl.log"
 fastdl_log_age           "7"
 ```
