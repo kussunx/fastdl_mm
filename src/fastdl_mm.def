@@ -1,0 +1,3 @@
+LIBRARY fastdl_mm
+EXPORTS
+    GiveFnptrsToDll=_GiveFnptrsToDll@8

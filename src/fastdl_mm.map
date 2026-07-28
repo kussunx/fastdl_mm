@@ -1,0 +1,12 @@
+/* Linux equivalent of fastdl_mm.def: export the Metamod entry points only.
+   Without this, vague-linkage symbols from std:: templates stay visible,
+   because libstdc++ declares namespace std with default visibility. */
+{
+    global:
+        GiveFnptrsToDll;
+        Meta_Query;
+        Meta_Attach;
+        Meta_Detach;
+    local:
+        *;
+};
