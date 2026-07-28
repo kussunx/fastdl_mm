@@ -78,7 +78,7 @@ const Setting g_settings[] = {
     {&cvarServeDirs,    "subdirectories served, comma separated"},
     {&cvarServeTypes,   "extensions served, comma separated"},
     {&cvarMaxFileMb,    "refuse files larger than this"},
-    {&cvarThreads,      "HTTP worker threads"},
+    {&cvarThreads,      "HTTP worker threads; raise only for slow disks"},
     {&cvarConnections,  "concurrent connections per IP"},
     {&cvarRequests,     "requests per minute per IP"},
     {&cvarDenials,      "denials per minute before a temporary block"},
@@ -156,7 +156,11 @@ FastdlConfig readConfig() {
     config.maxFileBytes =
         static_cast<std::uint64_t>(boundedUnsigned("fastdl_max_file_mb", 1, 2048)) *
         1024ULL * 1024ULL;
-    config.threads = boundedUnsigned("fastdl_threads", 1, 16);
+    // Workers exist to overlap blocking file reads, not to add CPU: connections
+    // are pinned per worker, so one uncached read stalls only its own share.
+    // Cached reads never block, so more than a few is pure scheduler contention
+    // against the single game thread.
+    config.threads = boundedUnsigned("fastdl_threads", 1, 4);
     config.maxConnectionsPerIp =
         boundedUnsigned("fastdl_max_connections_ip", 1, 256);
     config.requestsPerMinute = boundedUnsigned("fastdl_requests_minute", 1, 10000);
