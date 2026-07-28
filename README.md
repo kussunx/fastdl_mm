@@ -72,13 +72,7 @@ Configure the client download URL:
 sv_downloadurl "http://203.0.113.10:27015"
 ```
 
-By default, `fastdl_port "0"` uses the same port number as HLDS. The game uses UDP and FastDL uses TCP, so they do not conflict.
-
-The default root is the `cstrike` directory. URLs must therefore be mod-relative:
-
-```text
-/maps/example.bsp
-```
+By default, `fastdl_port "0"` uses the same port number as HLDS.
 
 ## Main settings
 
@@ -95,7 +89,7 @@ fastdl_log               "logs/fastdl/fastdl.log"
 fastdl_log_age           "7"
 ```
 
-Changes to `fastdl_mm.cfg` persist after restart. Use `fastdl_restart` to apply changed cvars without restarting HLDS.
+Use `fastdl_restart` to apply changed cvars without restarting HLDS.
 
 ## Commands
 
@@ -108,7 +102,4 @@ fastdl_unblock <ip>
 ## Notes
 
 * Only `GET` and `HEAD` requests from the Steam downloader are served.
-* Directory traversal and files outside the configured root are blocked.
 * Files must match both `fastdl_serve_dirs` and `fastdl_serve_types`.
-* The plugin cannot be unloaded while HLDS is running.
-* Stop HLDS before replacing the plugin binary.
