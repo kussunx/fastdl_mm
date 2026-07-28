@@ -1,6 +1,6 @@
 # FastDL Metamod
 
-A FastDL server for HLDS in Metamod.
+A Metamod plugin that acts as as fastdl server for HLDS.
 
 ## Build
 
