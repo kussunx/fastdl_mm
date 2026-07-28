@@ -1,6 +1,6 @@
 # FastDL Metamod
 
-A standalone FastDL HTTP server for GoldSrc HLDS. Runs as a Metamod plugin and does not require AMX Mod X.
+A FastDL server for HLDS in Metamod.
 
 ## Build
 
