@@ -6,7 +6,13 @@ A standalone FastDL HTTP server for GoldSrc HLDS. Runs as a Metamod plugin and d
 
 HLDS is 32-bit, so the plugin must be built for 32-bit.
 
-Requires CMake and an SDK directory containing `cssdk/` and `metamod/`.
+Requires CMake and an SDK directory containing `cssdk/` and `metamod/`:
+
+- `cssdk/` — headers from [ReGameDLL_CS](https://github.com/rehlds/ReGameDLL_CS)
+  (`regamedll/`, which provides `common/`, `dlls/`, `engine/` and `public/`)
+- `metamod/` — plugin headers from [Metamod-R](https://github.com/rehlds/Metamod-R)
+
+Point `FASTDL_MM_SDK_ROOT` at the directory holding both.
 
 ### Windows
 
