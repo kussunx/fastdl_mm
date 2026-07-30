@@ -55,15 +55,15 @@ build/fastdl_mm_i386.so
 Copy the plugin and configuration file:
 
 ```text
-cstrike/addons/fastdl/dlls/fastdl_mm.dll
-cstrike/addons/fastdl/dlls/fastdl_mm.cfg
+cstrike/addons/fastdl/fastdl_mm.dll
+cstrike/addons/fastdl/fastdl_mm.cfg
 ```
 
 Add the appropriate line to `cstrike/addons/metamod/plugins.ini`:
 
 ```text
-win32 addons/fastdl/dlls/fastdl_mm.dll
-linux addons/fastdl/dlls/fastdl_mm_i386.so
+win32 addons/fastdl/fastdl_mm.dll
+linux addons/fastdl/fastdl_mm_i386.so
 ```
 
 Configure the client download URL:
