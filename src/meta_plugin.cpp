@@ -71,10 +71,10 @@ struct Setting {
 };
 
 const Setting g_settings[] = {
-    {&cvarEnabled,      "serve at all"},
+    {&cvarEnabled,      "toggle fastdl hosting"},
     {&cvarBind,         "listen address"},
     {&cvarPort,         "listen port (TCP); 0 uses the game port number"},
-    {&cvarRoot,         "directory URLs resolve under"},
+    {&cvarRoot,         "game mod directory"},
     {&cvarServeDirs,    "subdirectories served, comma separated"},
     {&cvarServeTypes,   "extensions served, comma separated"},
     {&cvarMaxFileMb,    "refuse files larger than this"},
@@ -272,7 +272,8 @@ bool writeDefaultConfig(const std::filesystem::path& path, std::string& error) {
         out << std::left << std::setw(width) << setting.cvar->name
             << '"' << setting.cvar->string << "\"\n";
     }
-    out << '\n';
+    out << "\n// remember to set sv_downloadurl to \"http://your-ip:port/\"\n"
+           "\n// CVARs:\n";
     for (const auto& setting : g_settings) {
         out << "// " << std::left << std::setw(width) << setting.cvar->name
             << setting.help << " (default \"" << setting.cvar->string << "\")\n";

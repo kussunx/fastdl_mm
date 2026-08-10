@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(fastdl_mm VERSION 1.0.2 LANGUAGES C CXX)
+project(fastdl_mm VERSION 1.0.5 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -135,15 +135,20 @@ add_custom_command(TARGET fastdl_mm POST_BUILD
 
 include(CTest)
 if(BUILD_TESTING)
+    # fastdl_server and microhttpd are here for one test: the request line
+    # parser is only reachable over a socket, so that case needs a live server.
     add_executable(fastdl_tests
         tests/tests.cpp
         src/config_parser.cpp
+        src/fastdl_server.cpp
         src/path_resolver.cpp
         src/rate_limiter.cpp
         src/logger.cpp)
     target_include_directories(fastdl_tests PRIVATE src)
+    target_link_libraries(fastdl_tests PRIVATE microhttpd)
     if(MSVC)
         target_compile_options(fastdl_tests PRIVATE /W4 /EHsc /MT$<$<CONFIG:Debug>:d>)
+        target_link_libraries(fastdl_tests PRIVATE ws2_32)
     else()
         target_compile_options(fastdl_tests PRIVATE -Wall -Wextra)
         find_package(Threads REQUIRED)

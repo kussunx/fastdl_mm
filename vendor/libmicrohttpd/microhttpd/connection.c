@@ -1394,6 +1394,7 @@ parse_initial_message_line (struct MHD_Connection *connection,
   char *uri;
   char *http_version;
   char *args;
+  char *space;
 
   if (NULL == (uri = strchr (line, ' ')))
     return MHD_NO;              /* serious error */
@@ -1402,7 +1403,17 @@ parse_initial_message_line (struct MHD_Connection *connection,
   uri++;
   while (' ' == uri[0])
     uri++;
-  http_version = strchr (uri, ' ');
+  /* LOCAL PATCH: the request target may hold unescaped spaces. The GoldSrc
+     client appends a resource name to sv_downloadurl verbatim, and map assets
+     are free to have spaces in their names. Splitting on the first space would
+     truncate the target and leave a version string that parses as neither
+     HTTP/1.0 nor HTTP/1.1, which also costs keep-alive. Split on the last
+     space that starts a version token instead, so the target keeps its own.
+     Later libmicrohttpd parses these lines too. */
+  http_version = NULL;
+  for (space = strchr (uri, ' '); NULL != space; space = strchr (space + 1, ' '))
+    if (MHD_str_equal_caseless_n_ (space + 1, "HTTP/", 5))
+      http_version = space;
   if (NULL != http_version)
     {
       http_version[0] = '\0';

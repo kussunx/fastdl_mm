@@ -1,11 +1,24 @@
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include "config_parser.h"
+#include "fastdl_server.h"
 #include "logger.h"
 #include "path_resolver.h"
 #include "rate_limiter.h"
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -43,6 +56,52 @@ void check(bool condition, const char* message) {
 void touch(const std::filesystem::path& path, const std::string& contents) {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream(path, std::ios::binary) << contents;
+}
+
+#ifdef _WIN32
+using RawSocket = SOCKET;
+void closeRaw(RawSocket sock) { closesocket(sock); }
+#else
+using RawSocket = int;
+constexpr RawSocket INVALID_SOCKET = -1;
+void closeRaw(RawSocket sock) { close(sock); }
+#endif
+
+// Writes a request line verbatim and returns the status code, or 0 if nothing
+// usable came back. Everything above the socket -- libmicrohttpd's own request
+// line parser included -- is under test, which is why this cannot be done
+// through PathResolver alone.
+int rawStatus(std::uint16_t port, const std::string& requestLine) {
+    const RawSocket sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET) return 0;
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    if (::connect(sock, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        closeRaw(sock);
+        return 0;
+    }
+
+    const std::string request = requestLine +
+        "\r\nHost: 127.0.0.1\r\nUser-Agent: Valve/Steam HTTP Client 1.0\r\n"
+        "Connection: close\r\n\r\n";
+    ::send(sock, request.data(), static_cast<int>(request.size()), 0);
+
+    // The status line can be split across reads, so collect until end of line.
+    std::string head;
+    char buffer[256];
+    while (head.find('\n') == std::string::npos && head.size() < 1024) {
+        const auto received = ::recv(sock, buffer, sizeof(buffer), 0);
+        if (received <= 0) break;
+        head.append(buffer, static_cast<std::size_t>(received));
+    }
+    closeRaw(sock);
+
+    const auto space = head.find(' ');
+    if (head.rfind("HTTP/", 0) != 0 || space == std::string::npos) return 0;
+    return std::atoi(head.c_str() + space + 1);
 }
 } // namespace
 
@@ -301,6 +360,48 @@ int main() {
         logger.write("entry");
         logger.stop();
         std::filesystem::remove_all(blockedDir, ec);
+    }
+
+    // Over a real socket, because the defect this guards against is in the
+    // request line and never reaches a handler. The Steam client does not
+    // percent-encode, so an asset with a space in its name arrives as
+    // "GET /models/momoko/shu (2).mdl HTTP/1.1".
+    {
+#ifdef _WIN32
+        WSADATA winsock{};
+        WSAStartup(MAKEWORD(2, 2), &winsock);
+#endif
+        touch(root / "models/momoko/shu (2).mdl", "model");
+
+        FastdlConfig config;
+        config.bindAddress = "127.0.0.1";
+        config.port = 18973;
+        config.root = root;
+        config.baseDir = root;
+        config.serveDirs = "maps,models";
+        config.serveTypes = types;
+        config.logPath = root / "logs" / "fastdl.log";
+        config.logAgeDays = 1;
+
+        FastdlServer server;
+        std::string serverError;
+        const bool started = server.start(config, serverError);
+        check(started, "test server binds the loopback port");
+        if (started) {
+            check(rawStatus(config.port, "GET /maps/test.bsp HTTP/1.1") == 200,
+                "an ordinary request line is unaffected");
+            check(rawStatus(config.port,
+                "GET /models/momoko/shu%20(2).mdl HTTP/1.1") == 200,
+                "an encoded space is served");
+            check(rawStatus(config.port,
+                "GET /models/momoko/shu (2).mdl HTTP/1.1") == 200,
+                "an unencoded space in the request target is served");
+            // Splitting on the first space used to turn this request into the
+            // one below it, which must stay a miss.
+            check(rawStatus(config.port, "GET /models/momoko/shu HTTP/1.1") == 404,
+                "the truncated name is still not a file");
+            server.stop();
+        }
     }
 
     std::filesystem::remove_all(logDir, ec);
