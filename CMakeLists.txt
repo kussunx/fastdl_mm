@@ -155,6 +155,19 @@ if(BUILD_TESTING)
         target_link_libraries(fastdl_tests PRIVATE Threads::Threads)
     endif()
     add_test(NAME fastdl_tests COMMAND fastdl_tests)
+
+    # Keep the root-level allowlist independently
+    # testable without involving libmicrohttpd or the game SDK interfaces.
+    add_executable(fastdl_root_types_tests
+        tests/root_types_tests.cpp
+        src/path_resolver.cpp)
+    target_include_directories(fastdl_root_types_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(fastdl_root_types_tests PRIVATE /W4 /EHsc /MT$<$<CONFIG:Debug>:d>)
+    else()
+        target_compile_options(fastdl_root_types_tests PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME fastdl_root_types_tests COMMAND fastdl_root_types_tests)
 endif()
 
 # Compiled rather than read from CMAKE_SIZEOF_VOID_P, which was probed before

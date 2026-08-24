@@ -83,11 +83,19 @@ fastdl_port              "0"
 fastdl_root              "cstrike"
 fastdl_serve_dirs        "sprites,sound,sounds,overviews,models,maps,gfx"
 fastdl_serve_types       "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2"
+fastdl_serve_root_types  "wad"
 fastdl_max_file_mb       "250"
 fastdl_threads           "1"
 fastdl_log               "logs/fastdl/fastdl.log"
 fastdl_log_age           "7"
 ```
+
+`fastdl_serve_root_types` is a separate allowlist for files directly below
+`fastdl_root`. Its default value, `wad`, permits GoldSrc WAD files such as
+`cstrike/custom.wad` without exposing unrelated root files such as `server.cfg`,
+`liblist.gam` or `motd.txt`. Root-level files must also pass
+`fastdl_serve_types`. Set `fastdl_serve_root_types ""` to restore the original
+root-deny behavior.
 
 Use `fastdl_restart` to apply changed cvars without restarting HLDS.
 
@@ -102,4 +110,8 @@ fastdl_unblock <ip>
 ## Notes
 
 * Only `GET` and `HEAD` requests from the Steam downloader are served.
-* Files must match both `fastdl_serve_dirs` and `fastdl_serve_types`.
+* Files in subdirectories must match both `fastdl_serve_dirs` and `fastdl_serve_types`.
+* Files directly below `fastdl_root` must match both `fastdl_serve_root_types` and
+  `fastdl_serve_types`.
+* Root-level requests are checked against their canonical target so a symlink or
+  junction cannot use the root allowlist as an alias into a served directory.
