@@ -1,0 +1,55 @@
+name: build-win32-test
+
+on:
+  push:
+    branches:
+      - zpr-enhancements
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout fastdl_mm
+        uses: actions/checkout@v4
+
+      - name: Fetch ReHLDS-compatible SDK headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/rehlds/ReGameDLL_CS.git deps/ReGameDLL_CS
+          git clone --depth 1 https://github.com/rehlds/Metamod-R.git deps/Metamod-R
+          New-Item -ItemType Directory -Force deps/sdk | Out-Null
+          New-Item -ItemType Junction -Path deps/sdk/cssdk -Target (Resolve-Path deps/ReGameDLL_CS/regamedll) | Out-Null
+          New-Item -ItemType Junction -Path deps/sdk/metamod -Target (Resolve-Path deps/Metamod-R/metamod) | Out-Null
+
+      - name: Configure Win32
+        shell: pwsh
+        run: cmake -S . -B build -A Win32 -DFASTDL_MM_SDK_ROOT="$env:GITHUB_WORKSPACE/deps/sdk"
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Verify PE32 x86 and package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item build/Release/fastdl_mm.dll artifact/fastdl_mm.dll
+          Copy-Item build/Release/fastdl_mm.cfg artifact/fastdl_mm.cfg
+          $hash = (Get-FileHash artifact/fastdl_mm.dll -Algorithm SHA256).Hash.ToLower()
+          Set-Content artifact/fastdl_mm.dll.sha256 "$hash  fastdl_mm.dll"
+          dumpbin /headers artifact/fastdl_mm.dll | Select-String "machine" | Out-File artifact/build-info.txt
+          Add-Content artifact/build-info.txt "commit=${env:GITHUB_SHA}"
+          Add-Content artifact/build-info.txt "configuration=Release Win32"
+          Get-Content artifact/build-info.txt
+
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastdl_mm-1.1.0-win32-test
+          path: artifact/*
+          if-no-files-found: error
