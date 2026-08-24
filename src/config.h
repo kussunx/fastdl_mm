@@ -16,6 +16,9 @@ struct FastdlConfig {
     // Comma separated. "*" allows everything, empty allows nothing.
     std::string serveDirs = "sprites,sound,sounds,overviews,models,maps,gfx";
     std::string serveTypes = "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2";
+    // Root-level files are denied unless their extension is explicitly listed
+    // here. Keep this narrow: GoldSrc WADs are the intended use case.
+    std::string serveRootTypes = "wad";
     std::uint64_t maxFileBytes = 250ULL * 1024ULL * 1024ULL;
     unsigned int threads = 1;
     unsigned int maxConnectionsPerIp = 32;

@@ -54,6 +54,8 @@ cvar_t cvarServeDirs = {"fastdl_serve_dirs",
 cvar_t cvarServeTypes = {"fastdl_serve_types",
     "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2",
     FCVAR_SERVER, 0.0f, nullptr};
+// ZPR enhancement by Kussun: root files use a separate, narrow allowlist.
+cvar_t cvarServeRootTypes = {"fastdl_serve_root_types", "wad", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarMaxFileMb = {"fastdl_max_file_mb", "250", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarThreads = {"fastdl_threads", "1", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarConnections = {"fastdl_max_connections_ip", "32", FCVAR_SERVER, 0.0f, nullptr};
@@ -71,20 +73,21 @@ struct Setting {
 };
 
 const Setting g_settings[] = {
-    {&cvarEnabled,      "toggle fastdl hosting"},
-    {&cvarBind,         "listen address"},
-    {&cvarPort,         "listen port (TCP); 0 uses the game port number"},
-    {&cvarRoot,         "game mod directory"},
-    {&cvarServeDirs,    "subdirectories served, comma separated"},
-    {&cvarServeTypes,   "extensions served, comma separated"},
-    {&cvarMaxFileMb,    "refuse files larger than this"},
-    {&cvarThreads,      "HTTP worker threads; raise only for slow disks"},
-    {&cvarConnections,  "concurrent connections per IP"},
-    {&cvarRequests,     "requests per minute per IP"},
-    {&cvarDenials,      "denials per minute before a temporary block"},
-    {&cvarBlockSeconds, "how long a block lasts, in seconds"},
-    {&cvarLog,          "log base path; one file per day"},
-    {&cvarLogAge,       "days of logs to keep, 0 keeps all"}
+    {&cvarEnabled,        "toggle fastdl hosting"},
+    {&cvarBind,           "listen address"},
+    {&cvarPort,           "listen port (TCP); 0 uses the game port number"},
+    {&cvarRoot,           "game mod directory"},
+    {&cvarServeDirs,      "subdirectories served, comma separated"},
+    {&cvarServeTypes,     "extensions served, comma separated"},
+    {&cvarServeRootTypes, "root-level extensions served, comma separated"},
+    {&cvarMaxFileMb,      "refuse files larger than this"},
+    {&cvarThreads,        "HTTP worker threads; raise only for slow disks"},
+    {&cvarConnections,    "concurrent connections per IP"},
+    {&cvarRequests,       "requests per minute per IP"},
+    {&cvarDenials,        "denials per minute before a temporary block"},
+    {&cvarBlockSeconds,   "how long a block lasts, in seconds"},
+    {&cvarLog,            "log base path; one file per day"},
+    {&cvarLogAge,         "days of logs to keep, 0 keeps all"}
 };
 
 unsigned int boundedUnsigned(const char* name, unsigned int minimum, unsigned int maximum) {
@@ -153,6 +156,7 @@ FastdlConfig readConfig() {
     config.baseDir = g_baseDir;
     config.serveDirs = g_engfuncs.pfnCVarGetString("fastdl_serve_dirs");
     config.serveTypes = g_engfuncs.pfnCVarGetString("fastdl_serve_types");
+    config.serveRootTypes = g_engfuncs.pfnCVarGetString("fastdl_serve_root_types");
     config.maxFileBytes =
         static_cast<std::uint64_t>(boundedUnsigned("fastdl_max_file_mb", 1, 2048)) *
         1024ULL * 1024ULL;
@@ -217,7 +221,7 @@ void startServer() {
         (followsGamePort ? " (game port)" : "") +
         ", threads=" + std::to_string(config.threads) +
         ", root=" + g_server.root().u8string());
-    print("serving " + config.serveDirs);
+    print("serving " + config.serveDirs + "; root types=" + config.serveRootTypes);
     printLogState();
 }
 
@@ -236,6 +240,7 @@ void commandStatus() {
         ", root=" + g_server.root().u8string());
     print("dirs=" + config.serveDirs);
     print("types=" + config.serveTypes);
+    print("root-types=" + config.serveRootTypes);
     print("threads=" + std::to_string(config.threads) +
         ", conn/ip=" + std::to_string(config.maxConnectionsPerIp) +
         ", req/min=" + std::to_string(config.requestsPerMinute) +
@@ -293,7 +298,7 @@ bool loadConfigFile(const std::filesystem::path& path, unsigned int& loaded,
     unsigned int& skipped, std::string& error) {
     static const std::unordered_set<std::string> allowedNames = {
         "fastdl_enabled", "fastdl_bind", "fastdl_port", "fastdl_root",
-        "fastdl_serve_dirs", "fastdl_serve_types",
+        "fastdl_serve_dirs", "fastdl_serve_types", "fastdl_serve_root_types",
         "fastdl_max_file_mb", "fastdl_threads",
         "fastdl_max_connections_ip", "fastdl_requests_minute",
         "fastdl_denials_minute", "fastdl_block_seconds", "fastdl_log",

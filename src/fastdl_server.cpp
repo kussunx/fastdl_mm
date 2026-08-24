@@ -127,7 +127,7 @@ bool FastdlServer::start(const FastdlConfig& config, std::string& error) {
     // Nothing to start, and nothing failed: running() reports false.
     if (!config_.enabled) return true;
     if (!resolver_.configure(resolveAgainstBase(config_.baseDir, config_.root),
-            config_.serveDirs, config_.serveTypes, error)) {
+            config_.serveDirs, config_.serveTypes, config_.serveRootTypes, error)) {
         return false;
     }
     // Serving is the job; the log is diagnostics. An unwritable log directory
