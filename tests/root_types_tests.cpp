@@ -42,7 +42,7 @@ int main() {
     check(legacy.resolve("/custom.wad", 1024).status == ResolveStatus::DirectoryDenied,
         "legacy resolver still denies root-level wad");
 
-    // ZPR enhancement by Kussun: explicitly allow WADs at fastdl_root.
+    // Explicitly allow WADs at fastdl_root.
     PathResolver resolver;
     check(resolver.configure(root, "maps", "wad,bsp,txt", "wad", error),
         "configure root wad allowlist");

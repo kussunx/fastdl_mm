@@ -3,6 +3,12 @@
 #endif
 
 #include <extdll.h>
+
+// ReGameDLL's Metamod utility header includes util.h without cbase.h. These
+// declarations are all util.h needs for a plugin that does not use game entities.
+class CBaseEntity;
+extern Vector g_vecZero;
+
 #include <meta_api.h>
 
 // Valve's HLSDK pulls minmax.h in through extdll.h, which defines min, max and
@@ -19,15 +25,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <system_error>
-#include <unordered_set>
 
 #ifndef FASTDL_MM_VERSION
 #define FASTDL_MM_VERSION "dev"
@@ -44,6 +51,8 @@ FastdlServer g_server;
 bool g_registered = false;
 bool g_startPending = false;
 std::filesystem::path g_baseDir;
+bool g_downloadUrlManaged = false;
+std::string g_previousDownloadUrl;
 
 cvar_t cvarEnabled = {"fastdl_enabled", "1", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarBind = {"fastdl_bind", "0.0.0.0", FCVAR_SERVER, 0.0f, nullptr};
@@ -54,14 +63,27 @@ cvar_t cvarServeDirs = {"fastdl_serve_dirs",
 cvar_t cvarServeTypes = {"fastdl_serve_types",
     "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2",
     FCVAR_SERVER, 0.0f, nullptr};
-// ZPR enhancement by Kussun: root files use a separate, narrow allowlist.
 cvar_t cvarServeRootTypes = {"fastdl_serve_root_types", "wad", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarMaxFileMb = {"fastdl_max_file_mb", "250", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarThreads = {"fastdl_threads", "1", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarMaxConnections = {"fastdl_max_connections", "64", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarConnections = {"fastdl_max_connections_ip", "32", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarConnectionTimeout = {
+    "fastdl_connection_timeout", "30", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarRequests = {"fastdl_requests_minute", "500", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarDenials = {"fastdl_denials_minute", "36", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarBlockSeconds = {"fastdl_block_seconds", "180", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarBandwidthMax = {"fastdl_bandwidth_max_mbps", "0", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarBandwidthIp = {"fastdl_bandwidth_ip_mbps", "0", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarSteamOnly = {"fastdl_steam_only", "1", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarGzip = {"fastdl_gzip", "0", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarGzipCache = {"fastdl_gzip_cache", "1", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarGzipCachePath = {
+    "fastdl_gzip_cache_path", "fastdl_cache", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarGzipCacheMaxMb = {
+    "fastdl_gzip_cache_max_mb", "256", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarAutoDownloadUrl = {"fastdl_auto_downloadurl", "0", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarPublicUrl = {"fastdl_public_url", "", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarLog = {"fastdl_log", "logs/fastdl/fastdl.log", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarLogAge = {"fastdl_log_age", "7", FCVAR_SERVER, 0.0f, nullptr};
 
@@ -82,18 +104,37 @@ const Setting g_settings[] = {
     {&cvarServeRootTypes, "root-level extensions served, comma separated"},
     {&cvarMaxFileMb,      "refuse files larger than this"},
     {&cvarThreads,        "HTTP worker threads; raise only for slow disks"},
+    {&cvarMaxConnections, "global concurrent connection limit"},
     {&cvarConnections,    "concurrent connections per IP"},
+    {&cvarConnectionTimeout, "idle connection timeout in seconds"},
     {&cvarRequests,       "requests per minute per IP"},
     {&cvarDenials,        "denials per minute before a temporary block"},
     {&cvarBlockSeconds,   "how long a block lasts, in seconds"},
+    {&cvarBandwidthMax,   "global response payload limit in Mbps; 0 is unlimited"},
+    {&cvarBandwidthIp,    "shared response payload limit per IP; 0 is unlimited"},
+    {&cvarSteamOnly,      "only accept the Steam downloader User-Agent"},
+    {&cvarGzip,           "serve cached gzip when the client accepts it"},
+    {&cvarGzipCache,      "prepare gzip representations on a background thread"},
+    {&cvarGzipCachePath,  "disk cache path outside fastdl_root"},
+    {&cvarGzipCacheMaxMb, "maximum compressed cache size"},
+    {&cvarAutoDownloadUrl,"set sv_downloadurl after a successful start"},
+    {&cvarPublicUrl,      "explicit public HTTP URL used by automatic mode"},
     {&cvarLog,            "log base path; one file per day"},
     {&cvarLogAge,         "days of logs to keep, 0 keeps all"}
 };
 
-unsigned int boundedUnsigned(const char* name, unsigned int minimum, unsigned int maximum) {
+unsigned int boundedUnsigned(const char* name, unsigned int minimum,
+    unsigned int maximum, unsigned int fallback) {
     const float value = g_engfuncs.pfnCVarGetFloat(name);
+    if (!std::isfinite(value)) return fallback;
     return static_cast<unsigned int>(std::clamp(value,
         static_cast<float>(minimum), static_cast<float>(maximum)));
+}
+
+double boundedRate(const char* name) {
+    const float value = g_engfuncs.pfnCVarGetFloat(name);
+    if (!std::isfinite(value) || value <= 0.0f) return 0.0;
+    return static_cast<double>(std::clamp(value, 0.1f, 10000.0f));
 }
 
 // The port HLDS serves the game on. Managed hosts allocate and firewall ports
@@ -150,7 +191,7 @@ FastdlConfig readConfig() {
     FastdlConfig config;
     config.enabled = g_engfuncs.pfnCVarGetFloat("fastdl_enabled") != 0.0f;
     config.bindAddress = g_engfuncs.pfnCVarGetString("fastdl_bind");
-    const unsigned int port = boundedUnsigned("fastdl_port", 0, 65535);
+    const unsigned int port = boundedUnsigned("fastdl_port", 0, 65535, 0);
     config.port = static_cast<std::uint16_t>(port == 0 ? gamePort() : port);
     config.root = std::filesystem::u8path(g_engfuncs.pfnCVarGetString("fastdl_root"));
     config.baseDir = g_baseDir;
@@ -158,25 +199,108 @@ FastdlConfig readConfig() {
     config.serveTypes = g_engfuncs.pfnCVarGetString("fastdl_serve_types");
     config.serveRootTypes = g_engfuncs.pfnCVarGetString("fastdl_serve_root_types");
     config.maxFileBytes =
-        static_cast<std::uint64_t>(boundedUnsigned("fastdl_max_file_mb", 1, 2048)) *
+        static_cast<std::uint64_t>(boundedUnsigned("fastdl_max_file_mb", 1, 2048, 250)) *
         1024ULL * 1024ULL;
     // Workers exist to overlap blocking file reads, not to add CPU: connections
     // are pinned per worker, so one uncached read stalls only its own share.
     // Cached reads never block, so more than a few is pure scheduler contention
     // against the single game thread.
-    config.threads = boundedUnsigned("fastdl_threads", 1, 4);
+    config.threads = boundedUnsigned("fastdl_threads", 1, 4, 1);
+    config.maxConnections = boundedUnsigned("fastdl_max_connections", 8, 128, 64);
     config.maxConnectionsPerIp =
-        boundedUnsigned("fastdl_max_connections_ip", 1, 256);
-    config.requestsPerMinute = boundedUnsigned("fastdl_requests_minute", 1, 10000);
-    config.denialsPerMinute = boundedUnsigned("fastdl_denials_minute", 1, 1000);
-    config.blockSeconds = boundedUnsigned("fastdl_block_seconds", 1, 86400);
+        boundedUnsigned("fastdl_max_connections_ip", 1, config.maxConnections, 32);
+    config.connectionTimeoutSeconds =
+        boundedUnsigned("fastdl_connection_timeout", 5, 300, 30);
+    config.requestsPerMinute = boundedUnsigned("fastdl_requests_minute", 1, 10000, 500);
+    config.denialsPerMinute = boundedUnsigned("fastdl_denials_minute", 1, 1000, 36);
+    config.blockSeconds = boundedUnsigned("fastdl_block_seconds", 1, 86400, 180);
+    config.bandwidthMaxMbps = boundedRate("fastdl_bandwidth_max_mbps");
+    config.bandwidthIpMbps = boundedRate("fastdl_bandwidth_ip_mbps");
+    config.steamOnly = g_engfuncs.pfnCVarGetFloat("fastdl_steam_only") != 0.0f;
+    config.gzip = g_engfuncs.pfnCVarGetFloat("fastdl_gzip") != 0.0f;
+    config.gzipCache = g_engfuncs.pfnCVarGetFloat("fastdl_gzip_cache") != 0.0f;
+    config.gzipCachePath =
+        std::filesystem::u8path(g_engfuncs.pfnCVarGetString("fastdl_gzip_cache_path"));
+    config.gzipCacheMaxBytes = static_cast<std::uint64_t>(
+        boundedUnsigned("fastdl_gzip_cache_max_mb", 16, 1024, 256)) * 1024ULL * 1024ULL;
+    config.autoDownloadUrl =
+        g_engfuncs.pfnCVarGetFloat("fastdl_auto_downloadurl") != 0.0f;
+    config.publicUrl = g_engfuncs.pfnCVarGetString("fastdl_public_url");
     config.logPath = std::filesystem::u8path(g_engfuncs.pfnCVarGetString("fastdl_log"));
-    config.logAgeDays = boundedUnsigned("fastdl_log_age", 0, 3650);
+    config.logAgeDays = boundedUnsigned("fastdl_log_age", 0, 3650, 7);
     return config;
 }
 
 void print(const std::string& text) {
     g_engfuncs.pfnServerPrint(("[FastDL] " + text + "\n").c_str());
+}
+
+std::string humanBytes(std::uint64_t bytes) {
+    static const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    double value = static_cast<double>(bytes);
+    std::size_t unit = 0;
+    while (value >= 1024.0 && unit + 1 < std::size(units)) {
+        value /= 1024.0;
+        ++unit;
+    }
+    std::ostringstream formatted;
+    formatted << std::fixed << std::setprecision(unit == 0 ? 0 : 1)
+              << value << ' ' << units[unit];
+    return formatted.str();
+}
+
+std::string humanRate(double bitsPerSecond) {
+    std::ostringstream formatted;
+    if (bitsPerSecond >= 1000000.0) {
+        formatted << std::fixed << std::setprecision(1)
+                  << bitsPerSecond / 1000000.0 << " Mbps";
+    } else if (bitsPerSecond >= 1000.0) {
+        formatted << std::fixed << std::setprecision(1)
+                  << bitsPerSecond / 1000.0 << " Kbps";
+    } else {
+        formatted << std::fixed << std::setprecision(0) << bitsPerSecond << " bps";
+    }
+    return formatted.str();
+}
+
+std::string configuredRate(double mbps) {
+    if (mbps <= 0.0) return "unlimited";
+    return humanRate(mbps * 1000000.0);
+}
+
+void restoreDownloadUrl() {
+    if (!g_downloadUrlManaged) return;
+    g_engfuncs.pfnCVarSetString("sv_downloadurl", g_previousDownloadUrl.c_str());
+    g_previousDownloadUrl.clear();
+    g_downloadUrlManaged = false;
+}
+
+bool normalizedPublicUrl(const std::string& configured, std::string& normalized) {
+    normalized = config::trim(configured);
+    if (normalized.rfind("http://", 0) != 0 || normalized.size() < 8) return false;
+    for (const unsigned char c : normalized) {
+        if (c <= 0x20 || c == 0x7f || c == '"' || c == '#') return false;
+    }
+    const auto authorityEnd = normalized.find('/', 7);
+    const auto authority = normalized.substr(7,
+        authorityEnd == std::string::npos ? std::string::npos : authorityEnd - 7);
+    if (authority.empty() || authority.front() == ':' || authority.back() == ':') return false;
+    if (normalized.back() != '/') normalized.push_back('/');
+    return normalized.size() <= 127;
+}
+
+void configureDownloadUrl(const FastdlConfig& config) {
+    if (!config.autoDownloadUrl) return;
+    std::string url;
+    if (!normalizedPublicUrl(config.publicUrl, url)) {
+        print("automatic sv_downloadurl skipped: fastdl_public_url must be a valid "
+              "http:// URL of at most 127 characters");
+        return;
+    }
+    g_previousDownloadUrl = g_engfuncs.pfnCVarGetString("sv_downloadurl");
+    g_engfuncs.pfnCVarSetString("sv_downloadurl", url.c_str());
+    g_downloadUrlManaged = true;
+    print("sv_downloadurl set to " + url);
 }
 
 // An sv_downloadurl nothing is serving costs each client a connect timeout per
@@ -203,6 +327,7 @@ void printLogState() {
 }
 
 void startServer() {
+    restoreDownloadUrl();
     const auto config = readConfig();
     if (!config.enabled) {
         g_server.stop();
@@ -222,40 +347,106 @@ void startServer() {
         ", threads=" + std::to_string(config.threads) +
         ", root=" + g_server.root().u8string());
     print("serving " + config.serveDirs + "; root types=" + config.serveRootTypes);
+    if (!g_server.compressionError().empty()) {
+        print("gzip disabled: " + g_server.compressionError());
+    }
+    configureDownloadUrl(config);
     printLogState();
 }
 
 void commandRestart() {
-    print("restarting");
-    startServer();
+    try {
+        print("restarting");
+        startServer();
+    } catch (...) {
+        g_engfuncs.pfnServerPrint("[FastDL] restart failed with an exception\n");
+    }
 }
 
 void commandStatus() {
-    if (!g_server.running()) {
-        print("stopped");
-        return;
+    try {
+        if (!g_server.running()) {
+            print("stopped");
+            return;
+        }
+        const auto& config = g_server.config();
+        print("running on " + config.bindAddress + ":" + std::to_string(config.port) +
+            ", root=" + g_server.root().u8string());
+        print("dirs=" + config.serveDirs);
+        print("types=" + config.serveTypes);
+        print("root-types=" + config.serveRootTypes);
+        print("threads=" + std::to_string(config.threads) +
+            ", connections=" + std::to_string(config.maxConnections) +
+            ", conn/ip=" + std::to_string(config.maxConnectionsPerIp) +
+            ", timeout=" + std::to_string(config.connectionTimeoutSeconds) + "s" +
+            ", req/min=" + std::to_string(config.requestsPerMinute) +
+            ", denials/min=" + std::to_string(config.denialsPerMinute) +
+            ", block=" + std::to_string(config.blockSeconds) + "s");
+        print("bandwidth global=" + configuredRate(config.bandwidthMaxMbps) +
+            ", per-IP=" + configuredRate(config.bandwidthIpMbps) +
+            ", Steam-only=" + (config.steamOnly ? "on" : "off") +
+            ", auto-url=" + (config.autoDownloadUrl ? "on" : "off"));
+        const auto compression = g_server.compressionStats();
+        print("gzip=" + std::string(config.gzip ? "on" : "off") +
+            ", cache=" + (compression.running ? "running" :
+                (config.gzipCache ? "stopped" : "off")) +
+            ", cache-path=" + config.gzipCachePath.generic_u8string());
+        if (!g_server.compressionError().empty()) {
+            print("gzip cache error: " + g_server.compressionError());
+        }
+        printLogState();
+    } catch (...) {
+        g_engfuncs.pfnServerPrint("[FastDL] status failed with an exception\n");
     }
-    const auto& config = g_server.config();
-    print("running on " + config.bindAddress + ":" + std::to_string(config.port) +
-        ", root=" + g_server.root().u8string());
-    print("dirs=" + config.serveDirs);
-    print("types=" + config.serveTypes);
-    print("root-types=" + config.serveRootTypes);
-    print("threads=" + std::to_string(config.threads) +
-        ", conn/ip=" + std::to_string(config.maxConnectionsPerIp) +
-        ", req/min=" + std::to_string(config.requestsPerMinute) +
-        ", denials/min=" + std::to_string(config.denialsPerMinute) +
-        ", block=" + std::to_string(config.blockSeconds) + "s");
-    printLogState();
+}
+
+void commandStats() {
+    try {
+        const auto stats = g_server.stats();
+        print("requests=" + std::to_string(stats.requests) +
+            ", active=" + std::to_string(stats.active) +
+            ", completed=" + std::to_string(stats.completed));
+        print("aborted=" + std::to_string(stats.aborted) +
+            ", timeouts=" + std::to_string(stats.timedOut) +
+            ", errors=" + std::to_string(stats.failed));
+        print("transferred=" + humanBytes(stats.transferredBytes) +
+            ", recent throughput=" + humanRate(stats.throughputBitsPerSecond));
+        const auto compression = g_server.compressionStats();
+        print("gzip cache entries=" + std::to_string(compression.entries) +
+            " (" + humanBytes(compression.bytes) + "), queued=" +
+            std::to_string(compression.queued) + ", hits=" +
+            std::to_string(compression.hits) + ", misses=" +
+            std::to_string(compression.misses) + ", errors=" +
+            std::to_string(compression.failures));
+    } catch (...) {
+        g_engfuncs.pfnServerPrint("[FastDL] stats failed with an exception\n");
+    }
+}
+
+void commandCacheBuild() {
+    try {
+        if (!g_server.compressionStats().running) {
+            print("gzip cache is not running; enable fastdl_gzip and fastdl_gzip_cache");
+            return;
+        }
+        g_server.buildCompressionCache();
+        print("gzip cache build queued on the background worker");
+    } catch (...) {
+        g_engfuncs.pfnServerPrint("[FastDL] cache build failed with an exception\n");
+    }
 }
 
 void commandUnblock() {
-    if (g_engfuncs.pfnCmd_Argc() != 2) {
-        print("usage: fastdl_unblock <ip>");
-        return;
+    try {
+        if (g_engfuncs.pfnCmd_Argc() != 2) {
+            print("usage: fastdl_unblock <ip>");
+            return;
+        }
+        const std::string ip = g_engfuncs.pfnCmd_Argv(1);
+        print(g_server.unblock(ip) ? "unblocked " + ip : "no state for " + ip);
+    } catch (...) {
+        g_engfuncs.pfnServerPrint("[FastDL] unblock failed with an exception\n");
     }
-    const std::string ip = g_engfuncs.pfnCmd_Argv(1);
-    print(g_server.unblock(ip) ? "unblocked " + ip : "no state for " + ip);
 }
 
 // Values are read back from the cvars, so a generated file always matches what
@@ -296,15 +487,6 @@ bool writeDefaultConfig(const std::filesystem::path& path, std::string& error) {
 // default whenever the config is newer than the binary beside it.
 bool loadConfigFile(const std::filesystem::path& path, unsigned int& loaded,
     unsigned int& skipped, std::string& error) {
-    static const std::unordered_set<std::string> allowedNames = {
-        "fastdl_enabled", "fastdl_bind", "fastdl_port", "fastdl_root",
-        "fastdl_serve_dirs", "fastdl_serve_types", "fastdl_serve_root_types",
-        "fastdl_max_file_mb", "fastdl_threads",
-        "fastdl_max_connections_ip", "fastdl_requests_minute",
-        "fastdl_denials_minute", "fastdl_block_seconds", "fastdl_log",
-        "fastdl_log_age"
-    };
-
     std::ifstream configFile(path);
     if (!configFile) {
         error = "could not open " + path.generic_u8string();
@@ -327,7 +509,9 @@ bool loadConfigFile(const std::filesystem::path& path, unsigned int& loaded,
             }
             continue;
         }
-        if (allowedNames.find(name) == allowedNames.end()) {
+        const bool known = std::any_of(std::begin(g_settings), std::end(g_settings),
+            [&name](const Setting& setting) { return name == setting.cvar->name; });
+        if (!known) {
             print("config: skipping unknown setting '" + name + "' on line " +
                 std::to_string(lineNumber));
             ++skipped;
@@ -348,6 +532,8 @@ void registerPlugin() {
     for (const auto& setting : g_settings) g_engfuncs.pfnCVarRegister(setting.cvar);
     g_engfuncs.pfnAddServerCommand("fastdl_restart", &commandRestart);
     g_engfuncs.pfnAddServerCommand("fastdl_status", &commandStatus);
+    g_engfuncs.pfnAddServerCommand("fastdl_stats", &commandStats);
+    g_engfuncs.pfnAddServerCommand("fastdl_cache_build", &commandCacheBuild);
     g_engfuncs.pfnAddServerCommand("fastdl_unblock", &commandUnblock);
     g_baseDir = resolveBaseDir();
     print("base directory " + g_baseDir.u8string());
@@ -374,23 +560,32 @@ void registerPlugin() {
         print("config error: " + configError);
     } else {
         print("config applied: " + std::to_string(loaded) + " settings" +
-        (skipped != 0 ? ", " + std::to_string(skipped) + " skipped" : "") +
-        ", port=" + std::string(g_engfuncs.pfnCVarGetString("fastdl_port")) +
-        ", root=" + g_engfuncs.pfnCVarGetString("fastdl_root"));
+            (skipped != 0 ? ", " + std::to_string(skipped) + " skipped" : "") +
+            ", port=" + std::string(g_engfuncs.pfnCVarGetString("fastdl_port")) +
+            ", root=" + g_engfuncs.pfnCVarGetString("fastdl_root"));
     }
     g_registered = true;
     g_startPending = true;
 }
 
 void gameInit() {
-    registerPlugin();
+    try {
+        registerPlugin();
+    } catch (...) {
+        g_engfuncs.pfnServerPrint("[FastDL] initialization failed with an exception\n");
+    }
     gpMetaGlobals->mres = MRES_IGNORED;
 }
 
 void startFrame() {
-    if (g_startPending) {
+    try {
+        if (g_startPending) {
+            g_startPending = false;
+            startServer();
+        }
+    } catch (...) {
         g_startPending = false;
-        startServer();
+        g_engfuncs.pfnServerPrint("[FastDL] deferred start failed with an exception\n");
     }
     gpMetaGlobals->mres = MRES_IGNORED;
 }
@@ -462,6 +657,11 @@ C_DLLEXPORT int Meta_Attach(PLUG_LOADTIME, META_FUNCTIONS* functionTable,
 }
 
 C_DLLEXPORT int Meta_Detach(PLUG_LOADTIME, PL_UNLOAD_REASON) {
-    g_server.stop();
-    return TRUE;
+    try {
+        restoreDownloadUrl();
+        g_server.stop();
+        return TRUE;
+    } catch (...) {
+        return FALSE;
+    }
 }
