@@ -68,12 +68,28 @@ else()
     target_compile_options(microhttpd PRIVATE -w)
 endif()
 
+add_library(miniz STATIC
+    vendor/miniz/miniz.c
+    vendor/miniz/miniz_tdef.c
+    vendor/miniz/miniz_tinfl.c)
+target_include_directories(miniz PUBLIC vendor/miniz)
+set_target_properties(miniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(MSVC)
+    target_compile_options(miniz PRIVATE /W3 /MT$<$<CONFIG:Debug>:d>)
+else()
+    target_compile_options(miniz PRIVATE -w)
+endif()
+
 add_library(fastdl_mm SHARED
     src/meta_plugin.cpp
     src/fastdl_server.cpp
     src/config_parser.cpp
     src/path_resolver.cpp
     src/rate_limiter.cpp
+    src/bandwidth_limiter.cpp
+    src/transfer_metrics.cpp
+    src/secure_file.cpp
+    src/compression_cache.cpp
     src/logger.cpp)
 
 if(WIN32)
@@ -87,7 +103,9 @@ target_include_directories(fastdl_mm SYSTEM PRIVATE
     ${FASTDL_MM_SDK_ROOT}/cssdk/dlls
     ${FASTDL_MM_SDK_ROOT}/cssdk/engine
     ${FASTDL_MM_SDK_ROOT}/cssdk/public
+    ${FASTDL_MM_SDK_ROOT}/cssdk/public/regamedll
     ${FASTDL_MM_SDK_ROOT}/metamod
+    ${FASTDL_MM_SDK_ROOT}/metamod/src
     ${MHD_ROOT}/include)
 
 target_compile_definitions(fastdl_mm PRIVATE
@@ -96,7 +114,7 @@ target_compile_definitions(fastdl_mm PRIVATE
     _CRT_SECURE_NO_WARNINGS
     FASTDL_MM_VERSION="${PROJECT_VERSION}")
 
-target_link_libraries(fastdl_mm PRIVATE microhttpd)
+target_link_libraries(fastdl_mm PRIVATE microhttpd miniz)
 if(WIN32)
     target_link_libraries(fastdl_mm PRIVATE ws2_32)
 endif()
@@ -143,9 +161,15 @@ if(BUILD_TESTING)
         src/fastdl_server.cpp
         src/path_resolver.cpp
         src/rate_limiter.cpp
+        src/bandwidth_limiter.cpp
+        src/transfer_metrics.cpp
+        src/secure_file.cpp
+        src/compression_cache.cpp
         src/logger.cpp)
     target_include_directories(fastdl_tests PRIVATE src)
-    target_link_libraries(fastdl_tests PRIVATE microhttpd)
+    target_compile_definitions(fastdl_tests PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(fastdl_tests PRIVATE microhttpd miniz)
     if(MSVC)
         target_compile_options(fastdl_tests PRIVATE /W4 /EHsc /MT$<$<CONFIG:Debug>:d>)
         target_link_libraries(fastdl_tests PRIVATE ws2_32)

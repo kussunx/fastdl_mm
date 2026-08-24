@@ -30,8 +30,7 @@ public:
     // allows nothing. Type entries may be written with or without a leading dot.
     bool configure(const std::filesystem::path& root, const std::string& dirs,
         const std::string& types, std::string& error);
-    // rootTypes is an independent allowlist for
-    // files requested directly below root (for example /custom.wad).
+    // rootTypes independently allows selected files directly below root.
     bool configure(const std::filesystem::path& root, const std::string& dirs,
         const std::string& types, const std::string& rootTypes, std::string& error);
     ResolvedFile resolve(const char* rawUrl, std::uint64_t maxBytes) const;

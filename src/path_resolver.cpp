@@ -204,8 +204,8 @@ ResolvedFile PathResolver::resolve(const char* rawUrl, std::uint64_t maxBytes) c
     result.extension = lowerAscii(candidate.extension().u8string());
     const bool requestedRootLevel = relative.parent_path().empty();
     if (requestedRootLevel) {
-        // Require the canonical target to remain at
-        // root too, so a root-level symlink/junction cannot alias a served dir.
+        // Require the canonical target to remain at root too, so a root-level
+        // symlink or junction cannot alias a served directory.
         if (parts.size() != 1 || !allowedRootExtension(result.extension)) {
             result.status = ResolveStatus::DirectoryDenied;
             return result;
