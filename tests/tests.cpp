@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -431,11 +433,12 @@ int main() {
         metrics.transferFinished(TransferOutcome::TimedOut);
         metrics.transferStarted();
         metrics.transferFinished(TransferOutcome::Failed);
+        metrics.failure();
         const auto stats = metrics.snapshot();
         check(stats.requests == 1, "metrics count requests");
         check(stats.active == 0, "metrics return active transfers to zero");
         check(stats.completed == 1 && stats.aborted == 1 && stats.timedOut == 1 &&
-            stats.failed == 1, "metrics classify transfer outcomes");
+            stats.failed == 2, "metrics classify transfer and pre-transfer failures");
         check(stats.transferredBytes == 4096, "metrics count supplied payload bytes");
         check(stats.throughputBitsPerSecond > 0.0, "metrics report recent throughput");
     }
@@ -460,6 +463,89 @@ int main() {
         check(granted == 20 * 1024, "small bandwidth rates use bounded quanta");
         check(elapsed >= 1.0 && elapsed < 4.0,
             "connections from one IP share the configured bandwidth");
+        bandwidth.stop();
+
+        bandwidth.configure(0.4, 0.0);
+        std::atomic<std::size_t> globalGranted{0};
+        const auto globalStarted = std::chrono::steady_clock::now();
+        std::thread globalA([&] {
+            for (int i = 0; i < 8; ++i) globalGranted.fetch_add(
+                bandwidth.acquire({}, 65536), std::memory_order_relaxed);
+        });
+        std::thread globalB([&] {
+            for (int i = 0; i < 8; ++i) globalGranted.fetch_add(
+                bandwidth.acquire({}, 65536), std::memory_order_relaxed);
+        });
+        globalA.join();
+        globalB.join();
+        const auto globalElapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - globalStarted).count();
+        check(globalGranted.load(std::memory_order_relaxed) == 16 * 2500,
+            "the global limiter bounds quanta across concurrent transfers");
+        check(globalElapsed >= 0.45 && globalElapsed < 3.0,
+            "the global bandwidth limit is shared across concurrent transfers");
+        bandwidth.stop();
+
+        bandwidth.configure(0.8, 0.4);
+        const auto sharedA = bandwidth.attach("192.0.2.2");
+        const auto sharedB = bandwidth.attach("192.0.2.2");
+        std::atomic<std::size_t> combinedGranted{0};
+        const auto combinedStarted = std::chrono::steady_clock::now();
+        std::thread combinedA([&] {
+            for (int i = 0; i < 8; ++i) combinedGranted.fetch_add(
+                bandwidth.acquire(sharedA, 65536), std::memory_order_relaxed);
+        });
+        std::thread combinedB([&] {
+            for (int i = 0; i < 8; ++i) combinedGranted.fetch_add(
+                bandwidth.acquire(sharedB, 65536), std::memory_order_relaxed);
+        });
+        combinedA.join();
+        combinedB.join();
+        const auto combinedElapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - combinedStarted).count();
+        check(combinedGranted.load(std::memory_order_relaxed) == 16 * 2500,
+            "combined global and per-IP limits grant bounded quanta");
+        check(combinedElapsed >= 0.45 && combinedElapsed < 3.0,
+            "the lower per-IP rate controls multiple connections when both limits apply");
+        bandwidth.stop();
+
+        bandwidth.configure(0.0, 0.4);
+        const auto independentA = bandwidth.attach("192.0.2.3");
+        const auto independentB = bandwidth.attach("192.0.2.4");
+        const auto independentStarted = std::chrono::steady_clock::now();
+        std::thread clientA([&] {
+            for (int i = 0; i < 8; ++i) bandwidth.acquire(independentA, 65536);
+        });
+        std::thread clientB([&] {
+            for (int i = 0; i < 8; ++i) bandwidth.acquire(independentB, 65536);
+        });
+        clientA.join();
+        clientB.join();
+        const auto independentElapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - independentStarted).count();
+        check(independentElapsed >= 0.15 && independentElapsed < 1.5,
+            "different IP buckets refill independently");
+        bandwidth.stop();
+
+        bandwidth.configure(0.0, 0.1);
+        const auto cancellable = bandwidth.attach("192.0.2.5");
+        std::atomic<bool> cancelled{false};
+        std::thread throttled([&] {
+            while (bandwidth.acquire(cancellable, 65536) != 0) {
+            }
+            cancelled.store(true, std::memory_order_release);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        bandwidth.stop();
+        throttled.join();
+        check(cancelled.load(std::memory_order_acquire),
+            "shutdown wakes a throttled transfer without a busy loop");
+        bandwidth.configure(std::numeric_limits<double>::infinity(), -1.0);
+        check(bandwidth.acquire({}, 65536) == 65536,
+            "non-finite and negative limits safely fall back to unlimited mode");
+        bandwidth.configure(0.0, 0.4);
+        check(bandwidth.acquire(bandwidth.attach("192.0.2.6"), 512) == 512,
+            "small transfers are not inflated to the limiter quantum");
         bandwidth.stop();
     }
 
@@ -615,6 +701,12 @@ int main() {
             check(head.status == 200 && head.body.empty(), "HEAD returns no body");
             check(head.headers["content-length"] == "16",
                 "HEAD preserves the GET Content-Length");
+            auto headRange = rawRequest(config.port,
+                "HEAD /maps/range.bsp HTTP/1.1", "Range: bytes=2-5\r\n");
+            check(headRange.status == 206 && headRange.body.empty() &&
+                headRange.headers["content-range"] == "bytes 2-5/16" &&
+                headRange.headers["content-length"] == "4",
+                "HEAD applies Range headers without returning a body");
 
             auto fixed = rawRequest(config.port, "GET /maps/range.bsp HTTP/1.1",
                 "Range: bytes=2-5\r\n");
@@ -733,6 +825,13 @@ int main() {
             check(warm.body.size() < 4096 && gunzip(warm.body, decompressed) &&
                 decompressed == std::string(256 * 1024, '\0'),
                 "cached gzip decompresses byte-for-byte to the source");
+            auto compressedNotModified = rawRequest(config.port,
+                "GET /maps/compress.bsp HTTP/1.1",
+                "Accept-Encoding: gzip\r\nIf-None-Match: " + warm.headers["etag"] + "\r\n");
+            check(compressedNotModified.status == 304 &&
+                compressedNotModified.headers["content-encoding"] == "gzip" &&
+                compressedNotModified.headers["vary"] == "Accept-Encoding",
+                "compressed validators preserve representation metadata on 304");
 
             auto identity = rawRequest(config.port, "GET /maps/compress.bsp HTTP/1.1");
             check(identity.status == 200 && identity.headers["content-encoding"].empty() &&
@@ -778,6 +877,18 @@ int main() {
             check(!server.compressionStats().running,
                 "shutdown cancels and joins cache work safely");
             std::filesystem::remove_all(cachePath, ec);
+
+            config.gzipCachePath = root / "unsafe-cache";
+            check(server.start(config, serverError),
+                "an unsafe cache path does not prevent uncompressed service");
+            check(!server.compressionError().empty(),
+                "a cache path inside the public content root is rejected");
+            auto safeFallback = rawRequest(config.port,
+                "GET /maps/compress.bsp HTTP/1.1", "Accept-Encoding: gzip\r\n");
+            check(safeFallback.status == 200 &&
+                safeFallback.headers["content-encoding"].empty(),
+                "cache configuration failure falls back to the source representation");
+            server.stop();
         }
     }
 
