@@ -43,9 +43,16 @@ jobs:
           New-Item -ItemType Directory -Force artifact | Out-Null
           Copy-Item build/Release/fastdl_mm.dll artifact/fastdl_mm.dll
           Copy-Item build/Release/fastdl_mm.cfg artifact/fastdl_mm.cfg
+          $dll = [IO.File]::ReadAllBytes((Resolve-Path artifact/fastdl_mm.dll))
+          if ($dll.Length -lt 64) { throw "DLL is too small to contain a valid PE header" }
+          $peOffset = [BitConverter]::ToInt32($dll, 0x3c)
+          if ($peOffset -lt 0 -or ($peOffset + 6) -gt $dll.Length) { throw "Invalid PE header offset" }
+          if ($dll[$peOffset] -ne 0x50 -or $dll[$peOffset+1] -ne 0x45 -or $dll[$peOffset+2] -ne 0 -or $dll[$peOffset+3] -ne 0) { throw "Invalid PE signature" }
+          $machine = [BitConverter]::ToUInt16($dll, $peOffset + 4)
+          if ($machine -ne 0x014c) { throw ("Expected IMAGE_FILE_MACHINE_I386 (0x014c), got 0x{0:x4}" -f $machine) }
           $hash = (Get-FileHash artifact/fastdl_mm.dll -Algorithm SHA256).Hash.ToLower()
           Set-Content artifact/fastdl_mm.dll.sha256 "$hash  fastdl_mm.dll"
-          dumpbin /headers artifact/fastdl_mm.dll | Select-String "machine" | Out-File artifact/build-info.txt
+          Set-Content artifact/build-info.txt "machine=0x014c IMAGE_FILE_MACHINE_I386"
           Add-Content artifact/build-info.txt "commit=${env:GITHUB_SHA}"
           Add-Content artifact/build-info.txt "configuration=Release Win32"
           Get-Content artifact/build-info.txt
