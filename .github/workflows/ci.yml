@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches:
+      - main
       - zpr-enhancements
     paths-ignore:
       - "**/*.md"
@@ -64,6 +65,7 @@ jobs:
           New-Item -ItemType Directory -Force artifact | Out-Null
           Copy-Item build/Release/fastdl_mm.dll artifact/fastdl_mm.dll
           Copy-Item build/Release/fastdl_mm.cfg artifact/fastdl_mm.cfg
+          Copy-Item config/fastdl_mm.zpr.example.cfg artifact/fastdl_mm.zpr.example.cfg
           $dll = [IO.File]::ReadAllBytes((Resolve-Path artifact/fastdl_mm.dll))
           if ($dll.Length -lt 64 -or $dll[0] -ne 0x4d -or $dll[1] -ne 0x5a) { throw "Invalid DOS/PE file" }
           $peOffset = [BitConverter]::ToInt32($dll, 0x3c)
@@ -73,9 +75,15 @@ jobs:
           if ($machine -ne 0x014c) { throw ("Expected IMAGE_FILE_MACHINE_I386 (0x014c), got 0x{0:x4}" -f $machine) }
           $hash = (Get-FileHash artifact/fastdl_mm.dll -Algorithm SHA256).Hash.ToLower()
           Set-Content artifact/fastdl_mm.dll.sha256 "$hash  fastdl_mm.dll"
-          Set-Content artifact/build-info.txt "machine=0x014c IMAGE_FILE_MACHINE_I386"
+          $project = Select-String CMakeLists.txt -Pattern '^project\(fastdl_mm VERSION ([0-9.]+) '
+          if ($null -eq $project -or $project.Matches.Count -eq 0) { throw "Could not read project version" }
+          $version = $project.Matches[0].Groups[1].Value
+          Set-Content artifact/build-info.txt "version=$version"
           Add-Content artifact/build-info.txt "commit=${env:GITHUB_SHA}"
-          Add-Content artifact/build-info.txt "configuration=Release Win32"
+          Add-Content artifact/build-info.txt "configuration=Release"
+          Add-Content artifact/build-info.txt "platform=Windows"
+          Add-Content artifact/build-info.txt "architecture=x86"
+          Add-Content artifact/build-info.txt "machine=0x014c IMAGE_FILE_MACHINE_I386"
           Get-Content artifact/build-info.txt
 
       - name: Upload Win32 test package
@@ -138,3 +146,31 @@ jobs:
               raise SystemExit(f"expected EM_386 (3), got {machine}")
           print("ELFCLASS32 EM_386 verified")
           PY
+
+      - name: Package Linux i386 artifact
+        run: |
+          mkdir -p artifact-linux
+          cp build/fastdl_mm_i386.so artifact-linux/fastdl_mm_i386.so
+          cp config/fastdl_mm.cfg artifact-linux/fastdl_mm.cfg
+          cp config/fastdl_mm.zpr.example.cfg artifact-linux/fastdl_mm.zpr.example.cfg
+          (
+            cd artifact-linux
+            sha256sum fastdl_mm_i386.so > fastdl_mm_i386.so.sha256
+          )
+          version=$(sed -n 's/^project(fastdl_mm VERSION \([^ ]*\) .*/\1/p' CMakeLists.txt)
+          test -n "$version"
+          printf '%s\n' \
+            "version=$version" \
+            "commit=$GITHUB_SHA" \
+            "configuration=Release" \
+            "platform=Linux" \
+            "architecture=i386" \
+            "machine=3 EM_386" > artifact-linux/build-info.txt
+          cat artifact-linux/build-info.txt
+
+      - name: Upload Linux i386 test package
+        uses: actions/upload-artifact@v7
+        with:
+          name: fastdl_mm-linux-i386-${{ github.sha }}
+          path: artifact-linux/*
+          if-no-files-found: error
