@@ -30,8 +30,14 @@ public:
     // allows nothing. Type entries may be written with or without a leading dot.
     bool configure(const std::filesystem::path& root, const std::string& dirs,
         const std::string& types, std::string& error);
+    // rootTypes independently allows selected files directly below root.
+    bool configure(const std::filesystem::path& root, const std::string& dirs,
+        const std::string& types, const std::string& rootTypes, std::string& error);
     ResolvedFile resolve(const char* rawUrl, std::uint64_t maxBytes) const;
     const std::filesystem::path& root() const { return root_; }
+    std::vector<std::filesystem::path> scanDirectories() const;
+    bool servesRootFiles() const { return allRootTypes_ || !rootTypes_.empty(); }
+    bool containsPath(const std::filesystem::path& path) const;
 
     static std::vector<std::string> splitList(const std::string& value);
 
@@ -43,10 +49,13 @@ private:
         const std::filesystem::path& root, const std::filesystem::path& candidate);
     bool allowedDirectory(const std::string& name) const;
     bool allowedExtension(const std::string& extension) const;
+    bool allowedRootExtension(const std::string& extension) const;
 
     std::filesystem::path root_;
     std::vector<std::string> dirs_;
     std::vector<std::string> types_;
+    std::vector<std::string> rootTypes_;
     bool allDirs_ = false;
     bool allTypes_ = false;
+    bool allRootTypes_ = false;
 };

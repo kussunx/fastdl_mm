@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - zpr-enhancements
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGAMEDLL_COMMIT: 679973265e1ac99a43193119e0da212ee568f5f9
+  METAMOD_COMMIT: 4db16ff6edb8f68b4b5782713934bac2e88433f9
+
+jobs:
+  windows-x86:
+    name: Windows x86 Release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout fastdl_mm
+        uses: actions/checkout@v6
+
+      - name: Fetch pinned SDK headers
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force deps | Out-Null
+          git init deps/ReGameDLL_CS
+          git -C deps/ReGameDLL_CS remote add origin https://github.com/rehlds/ReGameDLL_CS.git
+          git -C deps/ReGameDLL_CS fetch --depth 1 origin $env:REGAMEDLL_COMMIT
+          git -C deps/ReGameDLL_CS checkout --detach FETCH_HEAD
+          git init deps/Metamod-R
+          git -C deps/Metamod-R remote add origin https://github.com/rehlds/Metamod-R.git
+          git -C deps/Metamod-R fetch --depth 1 origin $env:METAMOD_COMMIT
+          git -C deps/Metamod-R checkout --detach FETCH_HEAD
+          New-Item -ItemType Directory -Force deps/sdk | Out-Null
+          New-Item -ItemType Junction -Path deps/sdk/cssdk -Target (Resolve-Path deps/ReGameDLL_CS/regamedll) | Out-Null
+          New-Item -ItemType Junction -Path deps/sdk/metamod -Target (Resolve-Path deps/Metamod-R/metamod) | Out-Null
+
+      - name: Configure Win32
+        shell: pwsh
+        run: cmake -S . -B build -A Win32 -DBUILD_TESTING=ON -DFASTDL_MM_SDK_ROOT="$env:GITHUB_WORKSPACE/deps/sdk"
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Verify PE32 x86 and package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item build/Release/fastdl_mm.dll artifact/fastdl_mm.dll
+          Copy-Item build/Release/fastdl_mm.cfg artifact/fastdl_mm.cfg
+          Copy-Item config/fastdl_mm.zpr.example.cfg artifact/fastdl_mm.zpr.example.cfg
+          $dll = [IO.File]::ReadAllBytes((Resolve-Path artifact/fastdl_mm.dll))
+          if ($dll.Length -lt 64 -or $dll[0] -ne 0x4d -or $dll[1] -ne 0x5a) { throw "Invalid DOS/PE file" }
+          $peOffset = [BitConverter]::ToInt32($dll, 0x3c)
+          if ($peOffset -lt 0 -or ($peOffset + 6) -gt $dll.Length) { throw "Invalid PE header offset" }
+          if ($dll[$peOffset] -ne 0x50 -or $dll[$peOffset+1] -ne 0x45 -or $dll[$peOffset+2] -ne 0 -or $dll[$peOffset+3] -ne 0) { throw "Invalid PE signature" }
+          $machine = [BitConverter]::ToUInt16($dll, $peOffset + 4)
+          if ($machine -ne 0x014c) { throw ("Expected IMAGE_FILE_MACHINE_I386 (0x014c), got 0x{0:x4}" -f $machine) }
+          $hash = (Get-FileHash artifact/fastdl_mm.dll -Algorithm SHA256).Hash.ToLower()
+          Set-Content artifact/fastdl_mm.dll.sha256 "$hash  fastdl_mm.dll"
+          $project = Select-String CMakeLists.txt -Pattern '^project\(fastdl_mm VERSION ([0-9.]+) '
+          if ($null -eq $project -or $project.Matches.Count -eq 0) { throw "Could not read project version" }
+          $version = $project.Matches[0].Groups[1].Value
+          Set-Content artifact/build-info.txt "version=$version"
+          Add-Content artifact/build-info.txt "commit=${env:GITHUB_SHA}"
+          Add-Content artifact/build-info.txt "configuration=Release"
+          Add-Content artifact/build-info.txt "platform=Windows"
+          Add-Content artifact/build-info.txt "architecture=x86"
+          Add-Content artifact/build-info.txt "machine=0x014c IMAGE_FILE_MACHINE_I386"
+          Get-Content artifact/build-info.txt
+
+      - name: Upload Win32 test package
+        uses: actions/upload-artifact@v7
+        with:
+          name: fastdl_mm-win32-${{ github.sha }}
+          path: artifact/*
+          if-no-files-found: error
+
+  linux-i386:
+    name: Linux i386 Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fastdl_mm
+        uses: actions/checkout@v6
+
+      - name: Install multilib toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes g++-multilib libc6-dev-i386 ninja-build
+
+      - name: Fetch pinned SDK headers
+        run: |
+          mkdir -p deps
+          git init deps/ReGameDLL_CS
+          git -C deps/ReGameDLL_CS remote add origin https://github.com/rehlds/ReGameDLL_CS.git
+          git -C deps/ReGameDLL_CS fetch --depth 1 origin "$REGAMEDLL_COMMIT"
+          git -C deps/ReGameDLL_CS checkout --detach FETCH_HEAD
+          git init deps/Metamod-R
+          git -C deps/Metamod-R remote add origin https://github.com/rehlds/Metamod-R.git
+          git -C deps/Metamod-R fetch --depth 1 origin "$METAMOD_COMMIT"
+          git -C deps/Metamod-R checkout --detach FETCH_HEAD
+          mkdir -p deps/sdk
+          ln -s "$GITHUB_WORKSPACE/deps/ReGameDLL_CS/regamedll" deps/sdk/cssdk
+          ln -s "$GITHUB_WORKSPACE/deps/Metamod-R/metamod" deps/sdk/metamod
+
+      - name: Configure Linux i386
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DFASTDL_MM_SDK_ROOT="$GITHUB_WORKSPACE/deps/sdk"
+
+      - name: Build Release
+        run: cmake --build build --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Verify ELF32 i386
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          image = Path("build/fastdl_mm_i386.so").read_bytes()
+          if len(image) < 20 or image[:4] != b"\x7fELF":
+              raise SystemExit("invalid ELF header")
+          if image[4] != 1:
+              raise SystemExit(f"expected ELFCLASS32 (1), got {image[4]}")
+          byteorder = {1: "little", 2: "big"}.get(image[5])
+          if byteorder is None:
+              raise SystemExit(f"invalid ELF data encoding {image[5]}")
+          machine = int.from_bytes(image[18:20], byteorder)
+          if machine != 3:
+              raise SystemExit(f"expected EM_386 (3), got {machine}")
+          print("ELFCLASS32 EM_386 verified")
+          PY
+
+      - name: Package Linux i386 artifact
+        run: |
+          mkdir -p artifact-linux
+          cp build/fastdl_mm_i386.so artifact-linux/fastdl_mm_i386.so
+          cp config/fastdl_mm.cfg artifact-linux/fastdl_mm.cfg
+          cp config/fastdl_mm.zpr.example.cfg artifact-linux/fastdl_mm.zpr.example.cfg
+          (
+            cd artifact-linux
+            sha256sum fastdl_mm_i386.so > fastdl_mm_i386.so.sha256
+          )
+          version=$(sed -n 's/^project(fastdl_mm VERSION \([^ ]*\) .*/\1/p' CMakeLists.txt)
+          test -n "$version"
+          printf '%s\n' \
+            "version=$version" \
+            "commit=$GITHUB_SHA" \
+            "configuration=Release" \
+            "platform=Linux" \
+            "architecture=i386" \
+            "machine=3 EM_386" > artifact-linux/build-info.txt
+          cat artifact-linux/build-info.txt
+
+      - name: Upload Linux i386 test package
+        uses: actions/upload-artifact@v7
+        with:
+          name: fastdl_mm-linux-i386-${{ github.sha }}
+          path: artifact-linux/*
+          if-no-files-found: error

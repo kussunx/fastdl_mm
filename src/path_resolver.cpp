@@ -42,6 +42,12 @@ std::vector<std::string> PathResolver::splitList(const std::string& value) {
 
 bool PathResolver::configure(const std::filesystem::path& root, const std::string& dirs,
     const std::string& types, std::string& error) {
+    // Keep the original API closed by default: callers must opt in to root files.
+    return configure(root, dirs, types, "", error);
+}
+
+bool PathResolver::configure(const std::filesystem::path& root, const std::string& dirs,
+    const std::string& types, const std::string& rootTypes, std::string& error) {
     std::error_code ec;
     auto absolute = std::filesystem::absolute(root, ec);
     if (ec) {
@@ -67,12 +73,60 @@ bool PathResolver::configure(const std::filesystem::path& root, const std::strin
         }
         types_.push_back(item.front() == '.' ? item : "." + item);
     }
+
+    rootTypes_.clear();
+    allRootTypes_ = false;
+    for (const auto& item : splitList(rootTypes)) {
+        if (item == "*") {
+            allRootTypes_ = true;
+            continue;
+        }
+        rootTypes_.push_back(item.front() == '.' ? item : "." + item);
+    }
     return true;
 }
 
 bool PathResolver::allowedDirectory(const std::string& name) const {
     if (allDirs_) return true;
     return std::find(dirs_.begin(), dirs_.end(), name) != dirs_.end();
+}
+
+bool PathResolver::allowedRootExtension(const std::string& extension) const {
+    if (allRootTypes_) return true;
+    return std::find(rootTypes_.begin(), rootTypes_.end(), extension) != rootTypes_.end();
+}
+
+std::vector<std::filesystem::path> PathResolver::scanDirectories() const {
+    std::vector<std::filesystem::path> directories;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             root_, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (ec) break;
+        const auto canonical = std::filesystem::canonical(entry.path(), ec);
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (!std::filesystem::is_directory(canonical, ec) || ec ||
+            !containedBy(root_, canonical)) {
+            ec.clear();
+            continue;
+        }
+        const auto parts = componentsUnder(root_, canonical);
+        if (parts.size() != 1 || !allowedDirectory(parts.front())) continue;
+        const auto duplicate = std::find_if(directories.begin(), directories.end(),
+            [&canonical](const std::filesystem::path& existing) {
+                return componentEqual(existing, canonical);
+            });
+        if (duplicate == directories.end()) directories.push_back(canonical);
+    }
+    return directories;
+}
+
+bool PathResolver::containsPath(const std::filesystem::path& path) const {
+    std::error_code ec;
+    const auto canonical = std::filesystem::canonical(path, ec);
+    return !ec && containedBy(root_, canonical);
 }
 
 // MHD unescapes before invoking the handler, so the URL arrives decoded.
@@ -177,15 +231,24 @@ ResolvedFile PathResolver::resolve(const char* rawUrl, std::uint64_t maxBytes) c
     }
 
     // Canonical path, not the requested one: a junction inside a served
-    // directory could otherwise reach one that is not. Requiring a directory
-    // and a file refuses root-level files.
+    // directory could otherwise reach one that is not. Root-level requests are
+    // handled separately so only explicitly allowed root extensions can pass.
     const auto parts = componentsUnder(root_, candidate);
-    if (parts.size() < 2 || !allowedDirectory(parts.front())) {
+    result.extension = lowerAscii(candidate.extension().u8string());
+    const bool requestedRootLevel = relative.parent_path().empty();
+    if (requestedRootLevel) {
+        // Require the canonical target to remain at root too, so a root-level
+        // symlink or junction cannot alias a served directory.
+        if (parts.size() != 1 || !allowedRootExtension(result.extension)) {
+            result.status = ResolveStatus::DirectoryDenied;
+            return result;
+        }
+    } else if (parts.size() < 2 || !allowedDirectory(parts.front())) {
         result.status = ResolveStatus::DirectoryDenied;
         return result;
     }
 
-    result.extension = lowerAscii(candidate.extension().u8string());
+    // Root-level files must pass the global extension allowlist as well.
     if (!allowedExtension(result.extension)) {
         result.status = ResolveStatus::ExtensionDenied;
         return result;

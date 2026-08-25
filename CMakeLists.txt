@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(fastdl_mm VERSION 1.0.5 LANGUAGES C CXX)
+project(fastdl_mm VERSION 1.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -68,12 +68,28 @@ else()
     target_compile_options(microhttpd PRIVATE -w)
 endif()
 
+add_library(miniz STATIC
+    vendor/miniz/miniz.c
+    vendor/miniz/miniz_tdef.c
+    vendor/miniz/miniz_tinfl.c)
+target_include_directories(miniz PUBLIC vendor/miniz)
+set_target_properties(miniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(MSVC)
+    target_compile_options(miniz PRIVATE /W3 /MT$<$<CONFIG:Debug>:d>)
+else()
+    target_compile_options(miniz PRIVATE -w)
+endif()
+
 add_library(fastdl_mm SHARED
     src/meta_plugin.cpp
     src/fastdl_server.cpp
     src/config_parser.cpp
     src/path_resolver.cpp
     src/rate_limiter.cpp
+    src/bandwidth_limiter.cpp
+    src/transfer_metrics.cpp
+    src/secure_file.cpp
+    src/compression_cache.cpp
     src/logger.cpp)
 
 if(WIN32)
@@ -87,7 +103,9 @@ target_include_directories(fastdl_mm SYSTEM PRIVATE
     ${FASTDL_MM_SDK_ROOT}/cssdk/dlls
     ${FASTDL_MM_SDK_ROOT}/cssdk/engine
     ${FASTDL_MM_SDK_ROOT}/cssdk/public
+    ${FASTDL_MM_SDK_ROOT}/cssdk/public/regamedll
     ${FASTDL_MM_SDK_ROOT}/metamod
+    ${FASTDL_MM_SDK_ROOT}/metamod/src
     ${MHD_ROOT}/include)
 
 target_compile_definitions(fastdl_mm PRIVATE
@@ -96,7 +114,7 @@ target_compile_definitions(fastdl_mm PRIVATE
     _CRT_SECURE_NO_WARNINGS
     FASTDL_MM_VERSION="${PROJECT_VERSION}")
 
-target_link_libraries(fastdl_mm PRIVATE microhttpd)
+target_link_libraries(fastdl_mm PRIVATE microhttpd miniz)
 if(WIN32)
     target_link_libraries(fastdl_mm PRIVATE ws2_32)
 endif()
@@ -109,6 +127,9 @@ if(MSVC)
 else()
     # cvar_t takes char*, so literal initialisers are unavoidable.
     target_compile_options(fastdl_mm PRIVATE -Wall -Wextra -Wno-write-strings)
+    # ReGameDLL's public dbg.h uses the MSVC spelling; its own Linux build
+    # provides the same compatibility definition.
+    target_compile_definitions(fastdl_mm PRIVATE _vsnprintf=vsnprintf)
     # HLDS ships its own libstdc++ (GLIBCXX_3.4.16) and runs with
     # LD_LIBRARY_PATH=., so that copy shadows the system one and a modern
     # toolchain's symbols go unresolved. Link the runtime in, and keep its
@@ -143,9 +164,15 @@ if(BUILD_TESTING)
         src/fastdl_server.cpp
         src/path_resolver.cpp
         src/rate_limiter.cpp
+        src/bandwidth_limiter.cpp
+        src/transfer_metrics.cpp
+        src/secure_file.cpp
+        src/compression_cache.cpp
         src/logger.cpp)
     target_include_directories(fastdl_tests PRIVATE src)
-    target_link_libraries(fastdl_tests PRIVATE microhttpd)
+    target_compile_definitions(fastdl_tests PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(fastdl_tests PRIVATE microhttpd miniz)
     if(MSVC)
         target_compile_options(fastdl_tests PRIVATE /W4 /EHsc /MT$<$<CONFIG:Debug>:d>)
         target_link_libraries(fastdl_tests PRIVATE ws2_32)
@@ -155,6 +182,17 @@ if(BUILD_TESTING)
         target_link_libraries(fastdl_tests PRIVATE Threads::Threads)
     endif()
     add_test(NAME fastdl_tests COMMAND fastdl_tests)
+
+    add_executable(fastdl_root_types_tests
+        tests/root_types_tests.cpp
+        src/path_resolver.cpp)
+    target_include_directories(fastdl_root_types_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(fastdl_root_types_tests PRIVATE /W4 /EHsc /MT$<$<CONFIG:Debug>:d>)
+    else()
+        target_compile_options(fastdl_root_types_tests PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME fastdl_root_types_tests COMMAND fastdl_root_types_tests)
 endif()
 
 # Compiled rather than read from CMAKE_SIZEOF_VOID_P, which was probed before
