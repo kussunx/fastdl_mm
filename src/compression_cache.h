@@ -59,19 +59,26 @@ private:
 
     static bool eligible(const CompressionSource& source);
     static std::string sourceIdentity(const CompressionSource& source);
+    std::string skipIdentity(const CompressionSource& source) const;
     static std::string cacheKey(const std::string& identity);
     static bool containedBy(const std::filesystem::path& root,
         const std::filesystem::path& candidate);
+    static bool regularArtifact(const std::filesystem::path& path);
     bool markerMatches(const std::filesystem::path& path,
         const std::string& identity) const;
+    bool markerCurrent(const std::filesystem::path& path, bool skip) const;
+    bool stopping() const;
     void enqueue(const CompressionSource& source,
         const std::string& identity, const std::string& key);
     void run();
     void scanAndBuild();
     bool compress(const Job& job);
-    void refreshSizeAndPrune();
+    void recordArtifact(std::uint64_t size);
+    void maintainCache();
 
     static constexpr std::size_t kMaximumQueuedJobs = 1024;
+    static constexpr std::size_t kMaximumCacheEntries = 16384;
+    static constexpr std::uint64_t kMaximumMarkerBytes = 8192;
     std::filesystem::path cachePath_;
     const PathResolver* resolver_ = nullptr;
     std::uint64_t maxFileBytes_ = 0;

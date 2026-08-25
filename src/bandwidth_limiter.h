@@ -51,6 +51,8 @@ private:
     static std::int64_t reserve(Bucket& bucket, std::size_t bytes, std::int64_t now);
     void cleanupClients();
 
+    static constexpr std::size_t kMaximumTrackedClients = 256;
+
     Bucket global_;
     std::uint64_t perIpRate_ = 0;
     std::size_t quantum_ = 64 * 1024;
@@ -59,5 +61,6 @@ private:
     std::condition_variable wake_;
     std::mutex clientsMutex_;
     std::unordered_map<std::string, std::weak_ptr<Client>> clients_;
+    std::shared_ptr<Client> overflowClient_;
     std::size_t attachmentsSinceCleanup_ = 0;
 };

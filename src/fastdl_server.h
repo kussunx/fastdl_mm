@@ -10,14 +10,16 @@
 
 #include <microhttpd.h>
 
-#include <cstdint>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 // Populated during dispatch, logged once the connection finishes so the line
 // records the transfer outcome rather than the moment the response was queued.
 struct RequestState {
     bool handled = false;
+    bool invalidTarget = false;
     bool fileResponse = false;
     bool activeTransfer = false;
     unsigned int status = 0;
@@ -72,7 +74,8 @@ private:
         const char* reason, bool strike);
     void logCompleted(const RequestState& state, MHD_RequestTerminationCode code);
     static std::string clientIp(MHD_Connection* connection);
-    static std::string header(MHD_Connection* connection, const char* name);
+    static std::string header(
+        MHD_Connection* connection, const char* name, std::size_t maxLength);
     static bool steamClient(const std::string& userAgent);
     static const char* contentType(const std::string& extension);
     static const char* terminationName(MHD_RequestTerminationCode code);

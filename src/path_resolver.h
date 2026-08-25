@@ -35,6 +35,9 @@ public:
         const std::string& types, const std::string& rootTypes, std::string& error);
     ResolvedFile resolve(const char* rawUrl, std::uint64_t maxBytes) const;
     const std::filesystem::path& root() const { return root_; }
+    std::vector<std::filesystem::path> scanDirectories() const;
+    bool servesRootFiles() const { return allRootTypes_ || !rootTypes_.empty(); }
+    bool containsPath(const std::filesystem::path& path) const;
 
     static std::vector<std::string> splitList(const std::string& value);
 

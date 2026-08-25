@@ -69,6 +69,7 @@ void BandwidthLimiter::stop() {
     wake_.notify_all();
     std::lock_guard<std::mutex> lock(clientsMutex_);
     clients_.clear();
+    overflowClient_.reset();
     attachmentsSinceCleanup_ = 0;
 }
 
@@ -90,6 +91,15 @@ BandwidthLimiter::Lease BandwidthLimiter::attach(const std::string& ip) {
     const auto existing = clients_.find(ip);
     if (existing != clients_.end()) {
         if (auto client = existing->second.lock()) return Lease(std::move(client));
+    }
+    if (clients_.size() >= kMaximumTrackedClients) cleanupClients();
+    if (clients_.size() >= kMaximumTrackedClients) {
+        if (!overflowClient_) {
+            overflowClient_ = std::make_shared<Client>();
+            configureBucket(
+                overflowClient_->bucket, perIpRate_, quantum_, nowNanoseconds());
+        }
+        return Lease(overflowClient_);
     }
     auto client = std::make_shared<Client>();
     configureBucket(client->bucket, perIpRate_, quantum_, nowNanoseconds());
