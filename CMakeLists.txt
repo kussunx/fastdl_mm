@@ -127,6 +127,9 @@ if(MSVC)
 else()
     # cvar_t takes char*, so literal initialisers are unavoidable.
     target_compile_options(fastdl_mm PRIVATE -Wall -Wextra -Wno-write-strings)
+    # ReGameDLL's public dbg.h uses the MSVC spelling; its own Linux build
+    # provides the same compatibility definition.
+    target_compile_definitions(fastdl_mm PRIVATE _vsnprintf=vsnprintf)
     # HLDS ships its own libstdc++ (GLIBCXX_3.4.16) and runs with
     # LD_LIBRARY_PATH=., so that copy shadows the system one and a modern
     # toolchain's symbols go unresolved. Link the runtime in, and keep its
