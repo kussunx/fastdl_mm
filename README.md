@@ -71,7 +71,15 @@ linux addons/fastdl/fastdl_mm_i386.so
 Open the configured port for TCP. GoldSrc game traffic uses UDP; FastDL uses
 TCP. Both protocols may use the same numeric port without conflict. With
 `fastdl_port "0"`, the plugin follows the game port number, commonly TCP 27015
-beside UDP 27015.
+beside UDP 27015. This exact arrangement has been validated with ReHLDS on UDP
+27015 and FastDL on TCP 27015. Windows Firewall must allow TCP 27015, and an
+Internet-facing server must forward TCP 27015 through its router/NAT separately
+from the existing UDP rule.
+
+`fastdl_bind "0.0.0.0"` means listen on every local IPv4 interface. Do not put a
+public Internet address in `fastdl_bind` unless that address is actually assigned
+to a local interface. The externally reachable address belongs in
+`sv_downloadurl`, or in `fastdl_public_url` when automatic mode is enabled.
 
 Set the public URL manually:
 
@@ -93,6 +101,18 @@ The URL is assigned only after the listener starts successfully. The previous
 `sv_downloadurl` is restored on disable, failed restart, or plugin shutdown.
 No external public-IP service is queried and NAT routing is never guessed.
 
+For same-network testing, use the server machine's LAN address, for example:
+
+```text
+sv_downloadurl "http://192.168.1.42:27015/"
+```
+
+In the validated CS 1.6 Steam test, the client displayed a loopback URL such as
+`http://127.0.0.1:27015/` as its primary download location but did not reliably
+issue FastDL requests. The LAN address worked. This is an observed GoldSrc client
+behavior, not a claim that loopback fails in every build or environment. External
+players should use a public IP or, preferably, a hostname.
+
 ## Security model
 
 Every request must pass canonical path containment, directory, extension, and
@@ -100,6 +120,7 @@ size checks. The opened descriptor is checked again against its canonical path,
 closing the path-resolution/open race and rejecting symlink or junction escapes.
 Traversal components, backslashes, colons, decoded question/fragment markers,
 control characters, and excessive path depth or component length are rejected.
+Request targets and relevant HTTP headers are length-bounded before parsing.
 
 Subdirectory files must match both `fastdl_serve_dirs` and
 `fastdl_serve_types`. Files directly below `fastdl_root` must match both
@@ -119,6 +140,11 @@ to restore deny-all behavior for root-level files.
 traffic filter, not authentication or a security boundary. Disabling it permits
 ordinary HTTP clients, but all path, type, size, connection, request, denial,
 and bandwidth controls still apply.
+
+Per-IP request history and bandwidth bucket maps are bounded. When those bounds
+are exhausted, request limiting fails closed and excess bandwidth identities
+share a restrictive overflow bucket instead of allocating unbounded state or
+bypassing the configured rate.
 
 ## HTTP behavior
 
@@ -148,7 +174,8 @@ received by at most approximately one response block.
 
 `fastdl_stats` reports requests, active transfers, completed, aborted, timed
 out and failed transfers, cumulative payload, recent ten-second throughput,
-and gzip cache activity.
+and gzip cache activity. The recent value is zero after the rolling window has
+been idle long enough; it does not retain an old transfer rate indefinitely.
 
 Bandwidth limits use decimal megabits per second; zero is unlimited:
 
@@ -162,6 +189,22 @@ so opening more asset requests does not multiply its allowance. Token
 reservations are atomic; cancellation-aware condition-variable waits neither
 spin nor sleep on the game thread. Small time quanta improve fairness and cap
 shutdown latency.
+
+Leave both rates at zero until the host's sustained upload capacity is known.
+For a game server, a conservative global starting point is 70-80% of measured
+upload capacity, leaving headroom for ReHLDS UDP traffic and operating-system
+overhead. Set the per-IP value to a fraction of the global budget appropriate to
+the expected player count (often 10-25%); it should not exceed the global value.
+Measure during real downloads and reduce the limits if game latency or loss rises.
+
+`fastdl_threads "1"` remains the compatible default. Local regression measurements
+with four concurrent 128 KiB transfers found no material 1-versus-2 worker
+difference under a 4 Mbps global or per-IP limit; both delivered about 4.5 Mbps
+including the token bucket's bounded initial burst. Two workers improved an
+unlimited loopback micro-test, but that result is disk- and scheduler-dependent.
+Use two workers only when monitoring shows that concurrent slow downloads or
+limiter waits serialize clients; each extra worker adds stack and connection
+state inside the 32-bit ReHLDS process.
 
 ## Gzip response cache
 
@@ -178,7 +221,8 @@ FastDL. Real-time per-client compression was rejected because it would create
 unbounded CPU contention inside ReHLDS. Existing `.gz` and `.bz2` files remain
 ordinary allowlisted assets when requested by their actual names.
 
-Compression is off by default. To enable the validated, conservative path:
+Compression remains off in the compiled compatibility defaults. To enable it
+for a deployment validated with CS 1.6 Steam and ReHLDS:
 
 ```text
 fastdl_gzip              "1"
@@ -187,6 +231,13 @@ fastdl_gzip_cache_path   "fastdl_cache"
 fastdl_gzip_cache_max_mb "256"
 ```
 
+The real CS 1.6 Steam/ReHLDS validation confirmed cold source responses, warm
+gzip cache hits, `Content-Encoding: gzip`, Range fallback to identity, and
+byte-identical SHA-256 after decompression. The observed session ended with 70
+requests, 70 completed transfers, 20 gzip hits, 50 misses, and zero aborted,
+timed-out, or failed transfers.
+This deployment result is not a universal throughput or load guarantee.
+
 The cache path is resolved from the HLDS base directory and must be outside
 `fastdl_root`. On a miss, the request immediately receives the original file and
 one background worker prepares a gzip representation using fast compression.
@@ -194,10 +245,16 @@ Concurrent misses for the same source identity collapse into one job. The cache
 key includes canonical path, size, high-resolution modification time, and file
 identity; source changes therefore invalidate the old representation. Cache
 writes are temporary and renamed only after completion. Old artifacts are
-pruned to the configured size.
+pruned with a bounded oldest-entry set and 10% size hysteresis, so a full cache
+walk is not performed after every generated artifact. Stale `.skip` markers,
+temporary files, orphaned metadata, and representations for changed, deleted, or
+no-longer-served sources are cleaned at startup and explicit cache builds.
 
 Use `fastdl_cache_build` to queue a background scan of currently permitted
-assets. The command does not scan or compress from `StartFrame`.
+assets. It walks only configured served directories and allowed root-level files,
+not unrelated trees such as `addons`, `logs`, or `downloads`; every candidate
+still passes `PathResolver` and secure descriptor checks. The command does not
+scan or compress from `StartFrame`.
 
 Only BSP, WAD, MDL, SPR, WAV, BMP, TGA, TXT, and RES files of at least 1 KiB are
 considered. Results saving less than 5% are discarded. MP3, gzip, and bzip2 data
@@ -232,6 +289,11 @@ fastdl_steam_only            "1"
 fastdl_gzip                  "0"
 fastdl_auto_downloadurl      "0"
 ```
+
+For a ReHLDS deployment example validated with CS 1.6 Steam, start from
+[`config/fastdl_mm.rehlds.example.cfg`](config/fastdl_mm.rehlds.example.cfg). It uses
+TCP 27015 explicitly and enables gzip while leaving bandwidth unlimited until
+the host uplink is measured. The example does not change the compiled defaults.
 
 Older configuration files remain valid. Missing new settings retain compiled
 defaults, and malformed or unknown assignments are reported and skipped rather
