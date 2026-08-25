@@ -9,6 +9,7 @@
 #endif
 
 #include "config_parser.h"
+#include "compression_cache.h"
 #include "fastdl_server.h"
 #include "logger.h"
 #include "path_resolver.h"
@@ -77,6 +78,60 @@ void sizedFile(const std::filesystem::path& path, std::size_t bytes, char value 
         output.write(block.data(), static_cast<std::streamsize>(count));
         bytes -= count;
     }
+}
+
+void pseudoRandomFile(const std::filesystem::path& path, std::size_t bytes) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(path, std::ios::binary);
+    std::array<unsigned char, 64 * 1024> block{};
+    std::uint32_t state = 0x9e3779b9U;
+    while (bytes != 0) {
+        const auto count = std::min(bytes, block.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            block[i] = static_cast<unsigned char>(state);
+        }
+        output.write(reinterpret_cast<const char*>(block.data()),
+            static_cast<std::streamsize>(count));
+        bytes -= count;
+    }
+}
+
+std::size_t filesWithSuffix(
+    const std::filesystem::path& directory, const std::string& suffix) {
+    std::size_t count = 0;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+        if (ec) break;
+        const auto name = entry.path().filename().u8string();
+        if (name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) ++count;
+    }
+    return count;
+}
+
+template <typename Predicate>
+bool waitFor(Predicate predicate, int attempts = 500) {
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+}
+
+CompressionSource inspectSource(
+    const std::filesystem::path& path, const std::string& extension) {
+    CompressionSource source;
+    source.path = path;
+    source.extension = extension;
+    const int descriptor = openReadFile(path);
+    if (descriptor >= 0) {
+        inspectReadFile(descriptor, path, source.info);
+        closeReadFile(descriptor);
+    }
+    return source;
 }
 
 #ifdef _WIN32
@@ -246,7 +301,10 @@ int main() {
     touch(root / "maps/test.bsp.bz2", "compressed");
     touch(root / "maps/range.bsp", "0123456789abcdef");
     touch(root / "maps/secret.dll", "no");
+    touch(root / "models/scan.mdl", "model");
     touch(root / "addons/config.txt", "private");
+    touch(root / "logs/private.bsp", "private");
+    touch(root / "downloads/private.bsp", "private");
     touch(root / "liblist.gam", "top level");
     touch(root / "top.txt", "top level");
     touch(root / "custom.wad", "root wad");
@@ -257,6 +315,18 @@ int main() {
     std::string error;
     check(resolver.configure(root, "maps,models,sound", types, error),
         "configure test root");
+    const auto scanDirectories = resolver.scanDirectories();
+    check(scanDirectories.size() == 2 &&
+        std::any_of(scanDirectories.begin(), scanDirectories.end(),
+            [](const std::filesystem::path& path) {
+                return lower(path.filename().u8string()) == "maps";
+            }) &&
+        std::any_of(scanDirectories.begin(), scanDirectories.end(),
+            [](const std::filesystem::path& path) {
+                return lower(path.filename().u8string()) == "models";
+            }), "cache scans are limited to configured, existing serve directories");
+    check(!resolver.servesRootFiles(),
+        "the legacy resolver does not offer root files to cache scans");
     check(resolver.resolve("/maps/test.bsp", 1024).status == ResolveStatus::Ok,
         "allow bsp");
     check(resolver.resolve("/maps/test.bsp.bz2", 1024).status == ResolveStatus::Ok,
@@ -420,6 +490,19 @@ int main() {
     check(limiter.unblock("127.0.0.2"), "explicit unblock");
     check(!limiter.blocked("127.0.0.2"), "unblocked client stays clear");
 
+    RateLimiter boundedLimiter;
+    bool uniqueClientsAllowed = true;
+    for (int index = 0; index < 1024; ++index) {
+        uniqueClientsAllowed = uniqueClientsAllowed && !boundedLimiter.requestExceeded(
+            "198.51.100." + std::to_string(index), 2);
+    }
+    check(uniqueClientsAllowed, "bounded request state admits its documented client budget");
+    check(boundedLimiter.requestExceeded("203.0.113.1", 2),
+        "new source IPs fail closed when bounded request state is exhausted");
+    boundedLimiter.clear();
+    check(!boundedLimiter.requestExceeded("203.0.113.1", 2),
+        "clearing request state restores capacity");
+
     {
         TransferMetrics metrics;
         metrics.reset();
@@ -460,30 +543,34 @@ int main() {
         }
         const auto elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
+        const auto perIpMbps = static_cast<double>(granted) * 8.0 / elapsed / 1000000.0;
         check(granted == 20 * 1024, "small bandwidth rates use bounded quanta");
-        check(elapsed >= 1.0 && elapsed < 4.0,
-            "connections from one IP share the configured bandwidth");
+        check(perIpMbps >= 0.08 && perIpMbps <= 0.12,
+            "per-IP transfer rate remains within twenty percent of its limit");
         bandwidth.stop();
 
         bandwidth.configure(0.4, 0.0);
         std::atomic<std::size_t> globalGranted{0};
         const auto globalStarted = std::chrono::steady_clock::now();
         std::thread globalA([&] {
-            for (int i = 0; i < 8; ++i) globalGranted.fetch_add(
+            for (int i = 0; i < 20; ++i) globalGranted.fetch_add(
                 bandwidth.acquire({}, 65536), std::memory_order_relaxed);
         });
         std::thread globalB([&] {
-            for (int i = 0; i < 8; ++i) globalGranted.fetch_add(
+            for (int i = 0; i < 20; ++i) globalGranted.fetch_add(
                 bandwidth.acquire({}, 65536), std::memory_order_relaxed);
         });
         globalA.join();
         globalB.join();
         const auto globalElapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - globalStarted).count();
-        check(globalGranted.load(std::memory_order_relaxed) == 16 * 2500,
+        const auto globalBytes = globalGranted.load(std::memory_order_relaxed);
+        const auto globalMbps =
+            static_cast<double>(globalBytes) * 8.0 / globalElapsed / 1000000.0;
+        check(globalBytes == 40 * 2500,
             "the global limiter bounds quanta across concurrent transfers");
-        check(globalElapsed >= 0.45 && globalElapsed < 3.0,
-            "the global bandwidth limit is shared across concurrent transfers");
+        check(globalMbps >= 0.32 && globalMbps <= 0.48,
+            "global transfer rate remains within twenty percent of its limit");
         bandwidth.stop();
 
         bandwidth.configure(0.8, 0.4);
@@ -528,6 +615,27 @@ int main() {
         bandwidth.stop();
 
         bandwidth.configure(0.0, 0.1);
+        std::vector<BandwidthLimiter::Lease> trackedClients;
+        trackedClients.reserve(256);
+        for (int index = 0; index < 256; ++index) {
+            trackedClients.push_back(
+                bandwidth.attach("203.0.113." + std::to_string(index)));
+        }
+        const auto overflowA = bandwidth.attach("198.51.100.1");
+        const auto overflowB = bandwidth.attach("198.51.100.2");
+        const auto overflowStarted = std::chrono::steady_clock::now();
+        std::size_t overflowGranted = 0;
+        for (int index = 0; index < 20; ++index) {
+            overflowGranted += bandwidth.acquire(
+                index % 2 == 0 ? overflowA : overflowB, 65536);
+        }
+        const auto overflowElapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - overflowStarted).count();
+        check(overflowGranted == 20 * 1024 && overflowElapsed >= 1.0,
+            "excess source identities share a bounded per-IP overflow bucket");
+        bandwidth.stop();
+
+        bandwidth.configure(0.0, 0.1);
         const auto cancellable = bandwidth.attach("192.0.2.5");
         std::atomic<bool> cancelled{false};
         std::thread throttled([&] {
@@ -547,6 +655,97 @@ int main() {
         check(bandwidth.acquire(bandwidth.attach("192.0.2.6"), 512) == 512,
             "small transfers are not inflated to the limiter quantum");
         bandwidth.stop();
+    }
+
+    {
+        const auto cacheRoot = std::filesystem::temp_directory_path() /
+            "fastdl_mm_cache_maintenance_content";
+        const auto cachePath = std::filesystem::temp_directory_path() /
+            "fastdl_mm_cache_maintenance_data";
+        std::filesystem::remove_all(cacheRoot, ec);
+        std::filesystem::remove_all(cachePath, ec);
+        sizedFile(cacheRoot / "maps/compress.bsp", 256 * 1024);
+        pseudoRandomFile(cacheRoot / "maps/random.bsp", 128 * 1024);
+        sizedFile(cacheRoot / "addons/unserved.bsp", 256 * 1024);
+
+        PathResolver cacheResolver;
+        std::string cacheError;
+        check(cacheResolver.configure(cacheRoot, "maps", "bsp", cacheError),
+            "configure cache maintenance resolver");
+        CompressionCache cache;
+        check(cache.start(cachePath, cacheRoot, 4 * 1024 * 1024,
+                &cacheResolver, 1024 * 1024, cacheError),
+            "start direct compression cache");
+
+        auto compressible = inspectSource(cacheRoot / "maps/compress.bsp", ".bsp");
+        CachedRepresentation cached;
+        check(!cache.lookup(compressible, cached),
+            "direct cache cold lookup queues compression");
+        check(waitFor([&] { return cache.stats().entries == 1; }),
+            "direct cache produces a compressed entry");
+        check(cache.lookup(compressible, cached) && cached.size < 4096,
+            "direct cache warm lookup returns the compressed entry");
+
+        auto random = inspectSource(cacheRoot / "maps/random.bsp", ".bsp");
+        check(!cache.lookup(random, cached),
+            "poorly compressible source initially falls back");
+        check(waitFor([&] { return filesWithSuffix(cachePath, ".skip") == 1; }),
+            "poor compression creates one skip marker");
+        check(!cache.lookup(random, cached) && cache.stats().queued == 0,
+            "a current skip marker prevents repeated compression work");
+
+        sizedFile(cacheRoot / "maps/random.bsp", 128 * 1024, 'R');
+        cache.requestBuild();
+        check(waitFor([&] {
+            return filesWithSuffix(cachePath, ".skip") == 0 && cache.stats().entries == 2;
+        }), "source replacement cleans its stale skip and builds a new representation");
+
+        const std::string temporaryKey(32, 'a');
+        const std::string orphanKey(32, 'b');
+        const std::string staleSkipKey(32, 'c');
+        touch(cachePath / (temporaryKey + ".gz.tmp"), "partial");
+        touch(cachePath / (temporaryKey + ".meta.tmp"), "partial");
+        touch(cachePath / (temporaryKey + ".skip.tmp"), "partial");
+        touch(cachePath / (orphanKey + ".gz"), std::string(32, 'x'));
+        touch(cachePath / (orphanKey + ".meta"), "invalid");
+        touch(cachePath / (staleSkipKey + ".skip"), "invalid");
+        cache.requestBuild();
+        check(waitFor([&] {
+            return filesWithSuffix(cachePath, ".tmp") == 0 &&
+                !std::filesystem::exists(cachePath / (orphanKey + ".gz")) &&
+                !std::filesystem::exists(cachePath / (orphanKey + ".meta")) &&
+                !std::filesystem::exists(cachePath / (staleSkipKey + ".skip"));
+        }), "explicit cache maintenance removes temporary, orphan, and stale artifacts");
+
+        std::filesystem::remove(cacheRoot / "maps/compress.bsp", ec);
+        cache.requestBuild();
+        check(waitFor([&] { return cache.stats().entries == 1; }),
+            "deleted sources lose their inactive gzip and metadata artifacts");
+        cache.stop();
+
+        std::filesystem::remove_all(cachePath, ec);
+        for (int index = 0; index < 8; ++index) {
+            sizedFile(cacheRoot / "maps" / ("prune" + std::to_string(index) + ".bsp"),
+                256 * 1024, static_cast<char>('A' + index));
+        }
+        check(cache.start(cachePath, cacheRoot, 4096,
+                &cacheResolver, 1024 * 1024, cacheError),
+            "restart direct cache with a small maintenance budget");
+        for (int index = 0; index < 8; ++index) {
+            const auto source = inspectSource(
+                cacheRoot / "maps" / ("prune" + std::to_string(index) + ".bsp"), ".bsp");
+            cache.lookup(source, cached);
+        }
+        check(waitFor([&] { return cache.stats().queued == 0; }),
+            "bounded cache drains queued pruning inputs");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto pruned = cache.stats();
+        check(pruned.bytes <= 4096 && pruned.entries == filesWithSuffix(cachePath, ".gz"),
+            "amortized pruning keeps disk usage and entry accounting within budget");
+        cache.stop();
+
+        std::filesystem::remove_all(cacheRoot, ec);
+        std::filesystem::remove_all(cachePath, ec);
     }
 
     // Daily rotation and retention. Retention removes files, so check it keeps
@@ -772,6 +971,15 @@ int main() {
                 check(rawStatus(config.port, std::string("GET ") + target +
                     " HTTP/1.1") == 403, "encoded unsafe paths are denied");
             }
+            const std::string overlongTarget = "/maps/" + std::string(2050, 'a') + ".bsp";
+            check(rawStatus(config.port,
+                "GET " + overlongTarget + " HTTP/1.1") == 403,
+                "overlong request targets are rejected instead of truncated");
+            auto oversizedRange = rawRequest(config.port,
+                "GET /maps/range.bsp HTTP/1.1",
+                "Range: bytes=0-1" + std::string(300, '0') + "\r\n");
+            check(oversizedRange.status == 200,
+                "oversized Range metadata is safely ignored");
 
             const auto observed = server.stats();
             check(observed.active == 0, "completed HTTP requests leave no active transfer");
@@ -837,6 +1045,24 @@ int main() {
             check(identity.status == 200 && identity.headers["content-encoding"].empty() &&
                 identity.body.size() == 256 * 1024,
                 "clients that do not advertise gzip receive the source representation");
+            auto disabledByQuality = rawRequest(config.port,
+                "GET /maps/compress.bsp HTTP/1.1",
+                "Accept-Encoding: gzip; level=1; q=0\r\n");
+            check(disabledByQuality.status == 200 &&
+                disabledByQuality.headers["content-encoding"].empty(),
+                "gzip quality zero is honored after other encoding parameters");
+            auto invalidQuality = rawRequest(config.port,
+                "GET /maps/compress.bsp HTTP/1.1",
+                "Accept-Encoding: gzip;q=1.5\r\n");
+            check(invalidQuality.status == 200 &&
+                invalidQuality.headers["content-encoding"].empty(),
+                "invalid gzip quality values fall back to identity");
+            auto oversizedEncoding = rawRequest(config.port,
+                "GET /maps/compress.bsp HTTP/1.1",
+                "Accept-Encoding: gzip," + std::string(1100, 'x') + "\r\n");
+            check(oversizedEncoding.status == 200 &&
+                oversizedEncoding.headers["content-encoding"].empty(),
+                "oversized Accept-Encoding metadata is bounded and ignored");
             auto rangedCompressed = rawRequest(config.port,
                 "GET /maps/compress.bsp HTTP/1.1",
                 "Accept-Encoding: gzip\r\nRange: bytes=0-1023\r\n");
@@ -883,12 +1109,74 @@ int main() {
                 "an unsafe cache path does not prevent uncompressed service");
             check(!server.compressionError().empty(),
                 "a cache path inside the public content root is rejected");
+            check(!std::filesystem::exists(root / "unsafe-cache"),
+                "rejecting an unsafe cache path creates no public directory");
             auto safeFallback = rawRequest(config.port,
                 "GET /maps/compress.bsp HTTP/1.1", "Accept-Encoding: gzip\r\n");
             check(safeFallback.status == 200 &&
                 safeFallback.headers["content-encoding"].empty(),
                 "cache configuration failure falls back to the source representation");
             server.stop();
+
+            // This is deliberately a lightweight comparative measurement, not
+            // a scheduler-sensitive performance assertion. The token-bucket
+            // unit tests above enforce rate accuracy; these socket transfers
+            // exercise the interaction between libmicrohttpd workers and
+            // limiter waits with realistic concurrent responses.
+            constexpr std::size_t workerFileBytes = 128 * 1024;
+            constexpr std::size_t workerClients = 4;
+            sizedFile(root / "maps/workers.bsp", workerFileBytes, 'W');
+            config.gzip = false;
+            config.gzipCache = false;
+            config.gzipCachePath.clear();
+
+            const auto measureWorkers = [&](unsigned int threads,
+                                             double globalMbps,
+                                             double perIpMbps,
+                                             const char* label) {
+                config.threads = threads;
+                config.bandwidthMaxMbps = globalMbps;
+                config.bandwidthIpMbps = perIpMbps;
+                const bool measurementStarted = server.start(config, serverError);
+                check(measurementStarted, "worker measurement server starts");
+                if (!measurementStarted) return 0.0;
+                std::array<RawResponse, 4> responses;
+                std::array<std::thread, 4> requests;
+                const auto startedAt = std::chrono::steady_clock::now();
+                for (std::size_t index = 0; index < requests.size(); ++index) {
+                    requests[index] = std::thread([&, index] {
+                        responses[index] = rawRequest(
+                            config.port, "GET /maps/workers.bsp HTTP/1.1");
+                    });
+                }
+                for (auto& request : requests) request.join();
+                const auto elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - startedAt).count();
+                server.stop();
+                check(std::all_of(responses.begin(), responses.end(),
+                    [](const RawResponse& response) {
+                        return response.status == 200 &&
+                            response.body.size() == 128 * 1024;
+                    }), "concurrent worker measurements deliver complete responses");
+                const auto mbps = static_cast<double>(
+                    workerFileBytes * workerClients) * 8.0 / elapsed / 1000000.0;
+                std::cout << "worker measurement: " << label
+                          << ", threads=" << threads
+                          << ", seconds=" << elapsed
+                          << ", payload_mbps=" << mbps << '\n';
+                return elapsed;
+            };
+
+            const auto unlimitedOne = measureWorkers(1, 0.0, 0.0, "unlimited");
+            const auto unlimitedTwo = measureWorkers(2, 0.0, 0.0, "unlimited");
+            const auto globalOne = measureWorkers(1, 4.0, 0.0, "global-4mbps");
+            const auto globalTwo = measureWorkers(2, 4.0, 0.0, "global-4mbps");
+            const auto perIpOne = measureWorkers(1, 0.0, 4.0, "per-ip-4mbps");
+            const auto perIpTwo = measureWorkers(2, 0.0, 4.0, "per-ip-4mbps");
+            check(unlimitedOne > 0.0 && unlimitedTwo > 0.0 &&
+                globalOne > 0.0 && globalTwo > 0.0 &&
+                perIpOne > 0.0 && perIpTwo > 0.0,
+                "worker comparison covers one and two threads under all limiter modes");
         }
     }
 

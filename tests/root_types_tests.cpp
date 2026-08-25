@@ -46,6 +46,12 @@ int main() {
     PathResolver resolver;
     check(resolver.configure(root, "maps", "wad,bsp,txt", "wad", error),
         "configure root wad allowlist");
+    check(resolver.servesRootFiles(),
+        "root allowlist enables direct-file cache scanning");
+    const auto scanDirectories = resolver.scanDirectories();
+    check(scanDirectories.size() == 1 &&
+        scanDirectories.front().filename() == "maps",
+        "cache scanning exposes only configured serve directories");
     check(resolver.resolve("/custom.wad", 1024).status == ResolveStatus::Ok,
         "allow root-level wad");
     check(resolver.resolve("/top.txt", 1024).status == ResolveStatus::DirectoryDenied,

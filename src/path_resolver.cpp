@@ -96,6 +96,39 @@ bool PathResolver::allowedRootExtension(const std::string& extension) const {
     return std::find(rootTypes_.begin(), rootTypes_.end(), extension) != rootTypes_.end();
 }
 
+std::vector<std::filesystem::path> PathResolver::scanDirectories() const {
+    std::vector<std::filesystem::path> directories;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             root_, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (ec) break;
+        const auto canonical = std::filesystem::canonical(entry.path(), ec);
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (!std::filesystem::is_directory(canonical, ec) || ec ||
+            !containedBy(root_, canonical)) {
+            ec.clear();
+            continue;
+        }
+        const auto parts = componentsUnder(root_, canonical);
+        if (parts.size() != 1 || !allowedDirectory(parts.front())) continue;
+        const auto duplicate = std::find_if(directories.begin(), directories.end(),
+            [&canonical](const std::filesystem::path& existing) {
+                return componentEqual(existing, canonical);
+            });
+        if (duplicate == directories.end()) directories.push_back(canonical);
+    }
+    return directories;
+}
+
+bool PathResolver::containsPath(const std::filesystem::path& path) const {
+    std::error_code ec;
+    const auto canonical = std::filesystem::canonical(path, ec);
+    return !ec && containedBy(root_, canonical);
+}
+
 // MHD unescapes before invoking the handler, so the URL arrives decoded.
 // Decoding again would make file names containing a literal '%' unreachable.
 bool PathResolver::validate(const char* rawUrl, std::filesystem::path& relative) {

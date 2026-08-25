@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -23,11 +24,16 @@ private:
         Clock::time_point lastSeen{};
     };
 
-    static void trim(std::deque<Clock::time_point>& values, Clock::time_point cutoff);
-    void cleanup(Clock::time_point now);
+    static std::size_t trim(
+        std::deque<Clock::time_point>& values, Clock::time_point cutoff);
+    void cleanup(Clock::time_point now, bool force = false);
+    Client* findOrCreate(const std::string& ip, Clock::time_point now);
+
+    static constexpr std::size_t kMaximumClients = 1024;
+    static constexpr std::size_t kMaximumEvents = 131072;
 
     std::mutex mutex_;
     std::unordered_map<std::string, Client> clients_;
     Clock::time_point nextCleanup_{};
+    std::size_t eventCount_ = 0;
 };
-

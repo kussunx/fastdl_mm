@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -38,21 +39,32 @@
 namespace {
 constexpr std::size_t kFileBlockSize = 64 * 1024;
 
-std::string sanitize(std::string value, std::size_t limit) {
-    if (value.size() > limit) value.resize(limit);
+std::string sanitize(const std::string& value, std::size_t limit) {
     static const char digits[] = "0123456789abcdef";
     std::string out;
-    out.reserve(value.size());
+    out.reserve(std::min(value.size(), limit));
     for (const unsigned char c : value) {
         if (c < 0x20 || c == 0x7f) {
+            if (out.size() > limit || limit - out.size() < 4) break;
             out += "\\x";
             out += digits[c >> 4];
             out += digits[c & 0x0f];
         } else {
+            if (out.size() >= limit) break;
             out += static_cast<char>(c);
         }
     }
     return out;
+}
+
+bool boundedCopy(const char* value, std::size_t limit, std::string& result) {
+    result.clear();
+    if (value == nullptr) return true;
+    std::size_t length = 0;
+    while (length <= limit && value[length] != '\0') ++length;
+    if (length > limit) return false;
+    result.assign(value, length);
+    return true;
 }
 
 std::filesystem::path resolveAgainstBase(
@@ -230,17 +242,24 @@ bool acceptsGzip(const std::string& raw) {
         std::transform(coding.begin(), coding.end(), coding.begin(),
             [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         bool allowed = true;
-        if (semicolon != std::string::npos) {
-            auto parameters = item.substr(semicolon + 1);
-            parameters.erase(std::remove(parameters.begin(), parameters.end(), ' '),
-                parameters.end());
-            std::transform(parameters.begin(), parameters.end(), parameters.begin(),
+        for (auto parameterStart = semicolon;
+             parameterStart != std::string::npos && parameterStart < item.size();) {
+            ++parameterStart;
+            const auto parameterEnd = item.find(';', parameterStart);
+            auto parameter = trimAscii(std::string_view(item).substr(parameterStart,
+                (parameterEnd == std::string::npos ? item.size() : parameterEnd) -
+                    parameterStart));
+            std::transform(parameter.begin(), parameter.end(), parameter.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (parameters.rfind("q=", 0) == 0) {
+            if (parameter.rfind("q=", 0) == 0) {
                 char* endValue = nullptr;
-                const double quality = std::strtod(parameters.c_str() + 2, &endValue);
-                allowed = endValue != parameters.c_str() + 2 && quality > 0.0;
+                const double quality = std::strtod(parameter.c_str() + 2, &endValue);
+                const bool validQuality = endValue != parameter.c_str() + 2 &&
+                    endValue != nullptr && *endValue == '\0' &&
+                    std::isfinite(quality) && quality > 0.0 && quality <= 1.0;
+                allowed = allowed && validQuality;
             }
+            parameterStart = parameterEnd;
         }
         if (coding == "gzip") return allowed;
         if (coding == "*") {
@@ -438,9 +457,10 @@ int FastdlServer::handleRequest(void* cls, MHD_Connection* connection, const cha
         if (*requestContext == nullptr) {
             auto fresh = std::make_unique<RequestState>();
             fresh->ip = clientIp(connection);
-            fresh->method = sanitize(method ? method : "", 16);
-            fresh->url = sanitize(url ? url : "", 2048);
-            fresh->userAgent = sanitize(header(connection, MHD_HTTP_HEADER_USER_AGENT), 200);
+            if (!boundedCopy(method, 16, fresh->method)) fresh->method = "<overlong>";
+            fresh->invalidTarget = !boundedCopy(url, 2048, fresh->url);
+            if (fresh->invalidTarget) fresh->url = "<overlong>";
+            fresh->userAgent = header(connection, MHD_HTTP_HEADER_USER_AGENT, 200);
             *requestContext = fresh.release();
             return MHD_YES;
         }
@@ -499,6 +519,7 @@ int FastdlServer::dispatch(MHD_Connection* connection, RequestState& state) {
     if (limiter_.requestExceeded(state.ip, config_.requestsPerMinute)) {
         return deny(connection, state, "rate limit", false);
     }
+    if (state.invalidTarget) return deny(connection, state, "invalid path", true);
 
     const auto file = resolver_.resolve(state.url.c_str(), config_.maxFileBytes);
     switch (file.status) {
@@ -598,20 +619,21 @@ int FastdlServer::serveFile(MHD_Connection* connection, RequestState& state,
     }
 
     const auto lastModified = httpDate(opened.modifiedSeconds);
-    auto range = parseRange(header(connection, MHD_HTTP_HEADER_RANGE), opened.size);
+    auto range = parseRange(
+        header(connection, MHD_HTTP_HEADER_RANGE, 256), opened.size);
     if (range.status == RangeStatus::Invalid || range.status == RangeStatus::Unsatisfiable) {
         return respondRangeError(connection, state, opened.size);
     }
     const auto identityEtag = makeEtag(opened);
     if (range.status == RangeStatus::Valid &&
-        !ifRangeMatches(header(connection, MHD_HTTP_HEADER_IF_RANGE), identityEtag,
+        !ifRangeMatches(header(connection, MHD_HTTP_HEADER_IF_RANGE, 512), identityEtag,
             opened.modifiedSeconds)) range = {};
 
     const bool partial = range.status == RangeStatus::Valid;
     bool compressed = false;
     std::uint64_t responseLength = partial ? range.length : opened.size;
     if (!partial && config_.gzip && config_.gzipCache &&
-        acceptsGzip(header(connection, MHD_HTTP_HEADER_ACCEPT_ENCODING))) {
+        acceptsGzip(header(connection, MHD_HTTP_HEADER_ACCEPT_ENCODING, 1024))) {
         CompressionSource source{file.path, file.extension, opened};
         CachedRepresentation cached;
         if (compression_.lookup(source, cached)) {
@@ -628,11 +650,12 @@ int FastdlServer::serveFile(MHD_Connection* connection, RequestState& state,
     }
     const auto etag = makeEtag(opened, compressed);
 
-    const auto ifNoneMatch = header(connection, MHD_HTTP_HEADER_IF_NONE_MATCH);
+    const auto ifNoneMatch = header(connection, MHD_HTTP_HEADER_IF_NONE_MATCH, 2048);
     bool notModified = !ifNoneMatch.empty() && etagMatches(ifNoneMatch, etag);
     if (ifNoneMatch.empty()) {
         std::int64_t condition = 0;
-        const auto ifModifiedSince = header(connection, MHD_HTTP_HEADER_IF_MODIFIED_SINCE);
+        const auto ifModifiedSince =
+            header(connection, MHD_HTTP_HEADER_IF_MODIFIED_SINCE, 128);
         notModified = parseHttpDate(ifModifiedSince, condition) &&
             opened.modifiedSeconds <= condition;
     }
@@ -733,9 +756,11 @@ std::string FastdlServer::clientIp(MHD_Connection* connection) {
     return "unknown";
 }
 
-std::string FastdlServer::header(MHD_Connection* connection, const char* name) {
+std::string FastdlServer::header(
+    MHD_Connection* connection, const char* name, std::size_t maxLength) {
     const char* value = MHD_lookup_connection_value(connection, MHD_HEADER_KIND, name);
-    return value ? value : "";
+    std::string result;
+    return boundedCopy(value, maxLength, result) ? result : std::string{};
 }
 
 bool FastdlServer::steamClient(const std::string& userAgent) {
@@ -783,9 +808,11 @@ void FastdlServer::logCompleted(
         ? state.bytesSupplied.load(std::memory_order_relaxed) : state.responseSize;
     std::ostringstream line;
     line << '[' << std::put_time(&local, "%Y-%m-%dT%H:%M:%S") << "] "
-         << state.method << ' ' << state.url << " -> " << state.status
+         << sanitize(state.method, 16) << ' ' << sanitize(state.url, 2048)
+         << " -> " << state.status
          << ' ' << kilobytes(bytes) << ' ' << terminationName(code)
-         << " from " << state.ip << " [" << state.userAgent << ']';
+         << " from " << sanitize(state.ip, 64) << " ["
+         << sanitize(state.userAgent, 200) << ']';
     if (!state.reason.empty()) line << ' ' << state.reason;
     logger_.write(line.str());
 }
