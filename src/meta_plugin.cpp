@@ -103,7 +103,7 @@ const Setting g_settings[] = {
     {&cvarServeTypes,     "extensions served, comma separated"},
     {&cvarServeRootTypes, "root-level extensions served, comma separated"},
     {&cvarMaxFileMb,      "refuse files larger than this"},
-    {&cvarThreads,        "HTTP worker threads; raise only for slow disks"},
+    {&cvarThreads,        "HTTP workers; use 2 only for measured concurrent/slow transfers"},
     {&cvarMaxConnections, "global concurrent connection limit"},
     {&cvarConnections,    "concurrent connections per IP"},
     {&cvarConnectionTimeout, "idle connection timeout in seconds"},
